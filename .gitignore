@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime data — generated on first run, never committed
+~/.phone-bridge/
+*.pem
+*.key
+cert.pem
+key.pem
+
+# ngrok binary (downloaded automatically by pyngrok)
+.ngrok
+
+# Logs
+*.log
+audit.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Replit-specific (not needed in the repo)
+.replit
+replit.nix
+.upm/

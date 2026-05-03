@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0d0d17" />
+  <title>Phone Bridge — Viewer</title>
+  <link rel="stylesheet" href="/css/app.css" />
+  <style>
+    body, html { background: #000; }
+    #viewer-app {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: #000;
+      color: #e2e8f0;
+    }
+    #viewer-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 16px;
+      background: rgba(15, 15, 25, 0.85);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      flex-shrink: 0;
+    }
+    #viewer-bar h1 { font-size: 15px; font-weight: 700; flex: 1; margin: 0; }
+    #viewer-status {
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 99px;
+      background: #1e1e2e;
+      color: #94a3b8;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    #viewer-status.ok { color: #22c55e; border-color: rgba(34,197,94,.4); }
+    #viewer-status.warn { color: #f59e0b; border-color: rgba(245,158,11,.4); }
+    #viewer-status.danger { color: #ef4444; border-color: rgba(239,68,68,.4); }
+    #viewer-stage {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      position: relative;
+    }
+    #viewer-video {
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      background: #000;
+    }
+    #viewer-empty {
+      position: absolute;
+      text-align: center;
+      color: #94a3b8;
+      font-size: 14px;
+    }
+    .v-btn {
+      background: #1e1e2e;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .v-btn.primary { background: #7c3aed; border-color: #7c3aed; }
+
+    /* Reuse the existing PIN page styles */
+    #viewer-login { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 32px 24px; }
+    #viewer-login.hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Login Page (re-uses .login-card / .pin-* styles from app.css) -->
+<div id="viewer-login">
+  <div class="login-card">
+    <div class="login-logo">🖥️</div>
+    <div class="login-title">Phone Bridge — Viewer</div>
+    <div class="login-subtitle">Enter the bridge PIN to view the phone share</div>
+    <div class="pin-display" id="pin-display">
+      <div class="pin-dot" id="d0"></div>
+      <div class="pin-dot" id="d1"></div>
+      <div class="pin-dot" id="d2"></div>
+      <div class="pin-dot" id="d3"></div>
+      <div class="pin-dot" id="d4"></div>
+      <div class="pin-dot" id="d5"></div>
+    </div>
+    <div class="pin-pad">
+      <button class="pin-key" data-digit="1">1</button>
+      <button class="pin-key" data-digit="2">2</button>
+      <button class="pin-key" data-digit="3">3</button>
+      <button class="pin-key" data-digit="4">4</button>
+      <button class="pin-key" data-digit="5">5</button>
+      <button class="pin-key" data-digit="6">6</button>
+      <button class="pin-key" data-digit="7">7</button>
+      <button class="pin-key" data-digit="8">8</button>
+      <button class="pin-key" data-digit="9">9</button>
+      <button class="pin-key clear" id="pin-clear">⌫</button>
+      <button class="pin-key" data-digit="0">0</button>
+      <button class="pin-key submit" id="pin-submit">✓</button>
+    </div>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<div id="viewer-app" style="display:none">
+  <div id="viewer-bar">
+    <h1>Phone screen</h1>
+    <span id="viewer-status">connecting…</span>
+    <span id="vcall-status" class="vcall-pill">Idle</span>
+    <button class="v-btn primary" id="vcall-btn">📞  Call phone</button>
+    <button class="v-btn" id="viewer-fullscreen-btn">Fullscreen</button>
+  </div>
+  <div id="viewer-stage">
+    <video id="viewer-video" autoplay playsinline></video>
+    <div id="viewer-empty">Waiting for the phone to start sharing…</div>
+  </div>
+</div>
+
+<!-- Incoming-call ringer (laptop) -->
+<div id="vcall-ring" class="call-overlay" style="display:none">
+  <div class="call-card-modal ringing">
+    <div class="call-icon ring-pulse">📞</div>
+    <div class="call-status">Incoming call from phone</div>
+    <div class="call-actions">
+      <button class="call-action-btn accept" id="vcall-accept-btn">✓  Accept</button>
+      <button class="call-action-btn end" id="vcall-decline-btn">✕  Decline</button>
+    </div>
+  </div>
+</div>
+
+<!-- Active call (laptop) -->
+<div id="vcall-active" class="call-overlay" style="display:none">
+  <div class="call-card-modal">
+    <div class="call-icon">📞</div>
+    <div class="call-status" id="vcall-active-status">In call</div>
+    <div class="call-timer" id="vcall-timer">0:00</div>
+    <div class="call-actions">
+      <button class="call-action-btn" id="vcall-mute-btn">🎙  Mute</button>
+      <button class="call-action-btn end" id="vcall-end-btn">✕  End call</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module" src="/js/viewer.js"></script>
+</body>
+</html>

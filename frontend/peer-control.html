@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0d0d17" />
+  <title>Phone Bridge — Peer Control</title>
+  <link rel="stylesheet" href="/css/app.css" />
+  <style>
+    body, html { background: #000; margin: 0; padding: 0; height: 100%; }
+    /* Local visibility helper — app.css doesn't ship a generic
+       .hidden class, so this page defines its own to reliably gate
+       the login screen vs the controller UI. */
+    .hidden { display: none !important; }
+    #pc-app {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: #000;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #pc-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: rgba(15, 15, 25, 0.92);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    #pc-bar h1 { font-size: 14px; font-weight: 700; margin: 0; }
+    #pc-peer {
+      background: #1e1e2e;
+      color: #e2e8f0;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 13px;
+      min-width: 220px;
+    }
+    .pc-pill {
+      font-size: 11px;
+      padding: 3px 9px;
+      border-radius: 99px;
+      background: #1e1e2e;
+      color: #94a3b8;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    .pc-pill.ok      { color: #22c55e; border-color: rgba(34,197,94,.4); }
+    .pc-pill.warn    { color: #f59e0b; border-color: rgba(245,158,11,.4); }
+    .pc-pill.danger  { color: #ef4444; border-color: rgba(239,68,68,.4); }
+    .pc-spacer { flex: 1; }
+    .pc-btn {
+      background: #1e1e2e;
+      color: #e2e8f0;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .pc-btn:hover { background: #2a2a3e; }
+    .pc-btn.danger { color: #ef4444; border-color: rgba(239,68,68,.4); }
+    #pc-stage {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0a0a14;
+      position: relative;
+      overflow: hidden;
+    }
+    #pc-img {
+      max-width: 100%;
+      max-height: 100%;
+      display: none;
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+    #pc-img.live { display: block; }
+    #pc-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 14px;
+      color: #94a3b8;
+      pointer-events: none;
+      text-align: center;
+      padding: 20px;
+    }
+    #pc-overlay.dimmed { background: rgba(0,0,0,.55); }
+    #pc-overlay.hidden { display: none; }
+    #pc-overlay h2 { font-size: 18px; margin: 0; color: #e2e8f0; }
+    #pc-overlay p  { font-size: 13px; margin: 0; max-width: 420px; }
+    /* Capture keyboard input through a hidden input that grabs focus
+       when the user clicks the screen — same trick the phone-mirror
+       page uses. Without this, browsers swallow most key events on a
+       plain <img>. */
+    #pc-keys {
+      position: absolute;
+      opacity: 0;
+      width: 1px;
+      height: 1px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <!-- Reused PIN-entry markup so visitors who land here without a
+       valid token get the same login experience as the dashboard. -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-box">
+      <h1>📱 Laptop-Phone Bridge</h1>
+      <p class="login-subtitle">Enter your PIN to control a peer laptop</p>
+      <div id="pin-display" class="pin-display">
+        <div class="pin-dot" id="d0"></div><div class="pin-dot" id="d1"></div>
+        <div class="pin-dot" id="d2"></div><div class="pin-dot" id="d3"></div>
+        <div class="pin-dot" id="d4"></div><div class="pin-dot" id="d5"></div>
+      </div>
+      <div id="login-error" class="login-error"></div>
+      <div class="pin-keypad">
+        <button class="pin-key" data-digit="1">1</button>
+        <button class="pin-key" data-digit="2">2</button>
+        <button class="pin-key" data-digit="3">3</button>
+        <button class="pin-key" data-digit="4">4</button>
+        <button class="pin-key" data-digit="5">5</button>
+        <button class="pin-key" data-digit="6">6</button>
+        <button class="pin-key" data-digit="7">7</button>
+        <button class="pin-key" data-digit="8">8</button>
+        <button class="pin-key" data-digit="9">9</button>
+        <button class="pin-key" id="pin-clear">⌫</button>
+        <button class="pin-key" data-digit="0">0</button>
+        <button class="pin-key" id="pin-submit">↵</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="pc-app" class="hidden">
+    <div id="pc-bar">
+      <a href="/" class="pc-btn" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px">← Bridge</a>
+      <h1>🖥️ Peer Control</h1>
+      <select id="pc-peer" title="Pick which peer laptop to control">
+        <option value="">Loading peers…</option>
+      </select>
+      <span id="pc-peer-name" class="pc-pill ok" style="display:none"></span>
+      <span id="pc-status" class="pc-pill">idle</span>
+      <span id="pc-fps" class="pc-pill" title="Frames per second">— fps</span>
+      <span id="pc-rtt" class="pc-pill" title="Round-trip latency over the input channel">— ms</span>
+      <span class="pc-spacer"></span>
+      <button class="pc-btn" id="pc-reload" title="Force a fresh stream">Reload</button>
+      <button class="pc-btn danger" id="pc-disconnect">Disconnect</button>
+    </div>
+    <div id="pc-stage">
+      <input id="pc-keys" autocomplete="off" />
+      <img id="pc-img" alt="" />
+      <div id="pc-overlay">
+        <h2 id="pc-overlay-title">No peer selected</h2>
+        <p id="pc-overlay-msg">Pair another laptop with this bridge, then pick it from the dropdown above.</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/peer-control.js"></script>
+</body>
+</html>

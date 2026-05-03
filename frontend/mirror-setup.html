@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0d0d17" />
+  <title>Phone Bridge — Mirror Setup</title>
+  <link rel="stylesheet" href="/css/app.css" />
+  <style>
+    body, html { background: #0d0d17; color: #e2e8f0; }
+    #ms-app { max-width: 880px; margin: 0 auto; padding: 24px 20px 80px; }
+    #ms-app.hidden { display: none; }
+    #ms-login { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 32px 24px; }
+    #ms-login.hidden { display: none; }
+    .ms-h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+    .ms-sub { color: #94a3b8; font-size: 13px; margin-bottom: 20px; }
+    .ms-section {
+      background: #16162a;
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+    .ms-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .ms-row + .ms-row { margin-top: 10px; }
+    .ms-label { font-size: 13px; font-weight: 600; color: #cbd5e1; }
+    .ms-pill {
+      font-size: 11px; padding: 3px 10px; border-radius: 99px;
+      background: #1e1e2e; color: #94a3b8;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    .ms-pill.ok { color: #22c55e; border-color: rgba(34,197,94,.4); }
+    .ms-pill.warn { color: #f59e0b; border-color: rgba(245,158,11,.4); }
+    .ms-pill.danger { color: #ef4444; border-color: rgba(239,68,68,.4); }
+    .ms-input, .ms-select {
+      background: #0f0f1c;
+      color: #e2e8f0;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: inherit;
+      min-width: 0;
+    }
+    .ms-input { flex: 1; min-width: 140px; }
+    .ms-btn {
+      background: #1e1e2e;
+      color: #e2e8f0;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .ms-btn.primary { background: #7c3aed; border-color: #7c3aed; }
+    .ms-btn.danger { background: #ef4444; border-color: #ef4444; color: #fff; }
+    .ms-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .ms-hint { font-size: 12px; color: #94a3b8; margin-top: 6px; }
+    .ms-cmd {
+      display: flex; align-items: center; gap: 8px;
+      background: #0f0f1c;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px;
+      margin-top: 8px;
+    }
+    .ms-cmd code { flex: 1; word-break: break-all; color: #e2e8f0; }
+    .ms-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    .ms-dev {
+      display: flex; align-items: center; gap: 10px;
+      background: #0f0f1c;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+      flex-wrap: wrap;
+    }
+    .ms-dev-info { flex: 1; min-width: 0; }
+    .ms-dev-name { font-weight: 600; font-size: 14px; }
+    .ms-dev-meta { font-size: 12px; color: #94a3b8; word-break: break-all; }
+    .ms-dev-tag {
+      font-size: 10px; padding: 2px 7px; border-radius: 99px;
+      background: rgba(124,58,237,.18); color: #c4b5fd;
+      border: 1px solid rgba(124,58,237,.4);
+    }
+    .ms-dev-tag.unauth { background: rgba(245,158,11,.15); color: #fcd34d; border-color: rgba(245,158,11,.4); }
+    .ms-dev-tag.offline { background: rgba(239,68,68,.15); color: #fca5a5; border-color: rgba(239,68,68,.4); }
+    .ms-log {
+      background: #07070f;
+      color: #cbd5e1;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 10px;
+      max-height: 200px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    .ms-error {
+      color: #fca5a5;
+      font-size: 12px;
+      margin-top: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .ms-ol { padding-left: 20px; margin: 6px 0; font-size: 13px; color: #cbd5e1; line-height: 1.55; }
+    .ms-ol li { margin-bottom: 2px; }
+    .ms-empty { color: #94a3b8; font-size: 13px; padding: 8px 0; }
+    .ms-grid2 { display: grid; grid-template-columns: 1fr 100px; gap: 8px; align-items: center; }
+    @media (max-width: 520px) {
+      .ms-grid2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Login (re-uses .login-card / .pin-* styles from app.css) -->
+<div id="ms-login">
+  <div class="login-card">
+    <div class="login-logo">🪞</div>
+    <div class="login-title">Phone Bridge — Mirror Setup</div>
+    <div class="login-subtitle">Enter the bridge PIN to continue</div>
+    <div class="pin-display" id="pin-display">
+      <div class="pin-dot" id="d0"></div>
+      <div class="pin-dot" id="d1"></div>
+      <div class="pin-dot" id="d2"></div>
+      <div class="pin-dot" id="d3"></div>
+      <div class="pin-dot" id="d4"></div>
+      <div class="pin-dot" id="d5"></div>
+    </div>
+    <div class="pin-pad">
+      <button class="pin-key" data-digit="1">1</button>
+      <button class="pin-key" data-digit="2">2</button>
+      <button class="pin-key" data-digit="3">3</button>
+      <button class="pin-key" data-digit="4">4</button>
+      <button class="pin-key" data-digit="5">5</button>
+      <button class="pin-key" data-digit="6">6</button>
+      <button class="pin-key" data-digit="7">7</button>
+      <button class="pin-key" data-digit="8">8</button>
+      <button class="pin-key" data-digit="9">9</button>
+      <button class="pin-key clear" id="pin-clear">⌫</button>
+      <button class="pin-key" data-digit="0">0</button>
+      <button class="pin-key submit" id="pin-submit">✓</button>
+    </div>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<div id="ms-app" class="hidden">
+  <a href="/" style="display:inline-block;color:#9ca3af;text-decoration:none;margin-bottom:12px;font-size:14px">← Back to Bridge</a>
+  <h1 class="ms-h1">🪞 One-Click Phone Mirror</h1>
+  <p class="ms-sub">
+    Mirrors your full Android screen on this laptop with mouse + keyboard control,
+    using the system <code>scrcpy</code> tool. Open this page from a browser on the
+    laptop itself.
+  </p>
+
+  <!-- 1. Dependencies -->
+  <div class="ms-section">
+    <div class="ms-row">
+      <span class="ms-label">1. Dependencies</span>
+      <span id="dep-scrcpy" class="ms-pill">scrcpy: ?</span>
+      <span id="dep-adb" class="ms-pill">adb: ?</span>
+      <span id="dep-sndcpy" class="ms-pill" title="Optional: needed to play phone audio through the laptop">sndcpy: ?</span>
+      <span id="dep-vlc" class="ms-pill" title="Optional: VLC plays the audio stream">vlc: ?</span>
+      <button class="ms-btn" id="dep-refresh-btn" style="margin-left:auto">Recheck</button>
+    </div>
+    <div id="dep-install" style="display:none">
+      <div class="ms-hint">
+        <code>scrcpy</code> and <code>adb</code> are missing. On Parrot/Debian/Ubuntu:
+      </div>
+      <div class="ms-cmd">
+        <code id="install-cmd">sudo apt install scrcpy adb</code>
+        <button class="ms-btn" data-copy="install-cmd">Copy</button>
+      </div>
+      <div class="ms-hint">Run that in a laptop terminal, then click Recheck.</div>
+    </div>
+    <div id="dep-audio-install" style="display:none; margin-top:8px">
+      <div class="ms-hint">
+        Optional — needed only for <em>“Play phone audio through laptop speakers”</em>:
+      </div>
+      <div class="ms-hint" id="audio-install-hint"></div>
+    </div>
+  </div>
+
+  <!-- 2. Devices -->
+  <div class="ms-section">
+    <div class="ms-row">
+      <span class="ms-label">2. Connected devices</span>
+      <button class="ms-btn" id="dev-refresh-btn" style="margin-left:auto">Detect devices</button>
+    </div>
+    <div id="dev-list" class="ms-list">
+      <div class="ms-empty">Click <em>Detect devices</em> to scan over USB &amp; Wi-Fi.</div>
+    </div>
+    <div id="dev-error" class="ms-error"></div>
+  </div>
+
+  <!-- 3. Pair wirelessly -->
+  <div class="ms-section">
+    <div class="ms-row">
+      <span class="ms-label">3. Pair a phone wirelessly</span>
+    </div>
+
+    <!-- 3a. QR pairing (Android 11+) -->
+    <div style="margin-top:6px">
+      <div class="ms-row">
+        <strong style="font-size:13px;color:#cbd5e1">Pair with a QR code (Android 11+)</strong>
+        <span id="qr-status-pill" class="ms-pill" style="margin-left:auto">Idle</span>
+      </div>
+      <ol class="ms-ol">
+        <li>On your phone: <em>Settings → System → Developer options → Wireless debugging → Pair device with QR code</em>.</li>
+        <li>Tap <em>Show QR code</em> below, then point your phone's camera at this screen.</li>
+        <li>The bridge auto-detects, pairs, and connects — no typing needed.</li>
+      </ol>
+      <div class="ms-row" style="margin-top:6px">
+        <button class="ms-btn primary" id="qr-start-btn">Show QR code</button>
+        <button class="ms-btn" id="qr-cancel-btn" disabled>Cancel</button>
+      </div>
+      <div id="qr-area" style="display:none; text-align:center; margin-top:12px;
+                                 background:#fff; padding:14px; border-radius:10px;
+                                 max-width:280px; margin-left:auto; margin-right:auto;">
+        <canvas id="qr-canvas" width="240" height="240"
+                style="display:block; margin:0 auto;"></canvas>
+        <div id="qr-fallback-code" style="margin-top:8px; font-size:11px; color:#1e293b;
+                                           font-family:ui-monospace,monospace;"></div>
+      </div>
+      <div id="qr-message" class="ms-hint" style="margin-top:8px"></div>
+      <div id="qr-error" class="ms-error"></div>
+    </div>
+
+    <!-- 3b. Manual pairing fallback -->
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer; font-size:13px; color:#cbd5e1">
+        Or pair manually with a 6-digit code
+      </summary>
+      <div class="ms-hint" style="margin-top:8px">
+        💡 Tip: open Phone Bridge on your phone and look at the
+        <em>“Pair this phone”</em> card on the Stats page — it shows the phone's
+        IP and a one-tap copy button so you don't have to read it off the phone's
+        Settings screen.
+      </div>
+      <ol class="ms-ol">
+        <li>On your phone: <em>Wireless debugging → Pair device with pairing code</em>.</li>
+        <li>Your phone shows an <strong>IP &amp; port</strong> and a <strong>6-digit pairing code</strong>.</li>
+        <li>Type them below and tap <em>Pair</em>. (You only do this once per phone.)</li>
+        <li>Then enter the <em>regular</em> Wireless-debugging IP+port (different from the pairing one) and tap <em>Connect</em>.</li>
+      </ol>
+      <div class="ms-row" style="margin-top:6px">
+        <input class="ms-input" id="pair-host" placeholder="phone IP, e.g. 192.168.1.42" autocomplete="off" />
+        <input class="ms-input" id="pair-port" placeholder="pairing port" inputmode="numeric" style="max-width:130px" />
+        <input class="ms-input" id="pair-code" placeholder="pair code" inputmode="numeric" style="max-width:130px" />
+        <button class="ms-btn primary" id="pair-btn">Pair</button>
+      </div>
+      <div class="ms-row" style="margin-top:8px">
+        <button class="ms-btn" id="scan-start-btn">📷 Scan with webcam</button>
+        <select class="ms-select" id="scan-camera" style="max-width:220px" title="Pick which camera to use">
+          <option value="">Default camera</option>
+        </select>
+        <button class="ms-btn" id="scan-stop-btn" disabled>Stop camera</button>
+        <span id="scan-status" class="ms-hint" style="margin-left:8px"></span>
+      </div>
+      <div id="scan-area" style="display:none; margin-top:10px; text-align:center;
+                                  background:#0b1220; padding:10px; border-radius:10px;">
+        <div id="scan-frame" style="position:relative; display:inline-block;
+                                    width:100%; max-width:360px;">
+          <video id="scan-video" autoplay playsinline muted
+                 style="display:block; width:100%; border-radius:8px; background:#000;"></video>
+          <div id="scan-overlay" aria-hidden="true">
+            <div class="scan-reticle">
+              <span class="scan-corner tl"></span>
+              <span class="scan-corner tr"></span>
+              <span class="scan-corner bl"></span>
+              <span class="scan-corner br"></span>
+            </div>
+          </div>
+        </div>
+        <canvas id="scan-canvas" style="display:none"></canvas>
+        <div class="ms-hint" style="margin-top:6px">
+          Line the phone's “Pair this phone” QR up inside the square.
+        </div>
+      </div>
+      <div class="ms-row" style="margin-top:8px">
+        <input class="ms-input" id="conn-host" placeholder="phone IP" autocomplete="off" />
+        <input class="ms-input" id="conn-port" placeholder="connect port" inputmode="numeric" style="max-width:130px" />
+        <button class="ms-btn primary" id="conn-btn">Connect</button>
+      </div>
+      <div id="pair-status" class="ms-error"></div>
+    </details>
+  </div>
+
+  <!-- Quiet hours -->
+  <div class="ms-section" id="quiet-section">
+    <div class="ms-row">
+      <span class="ms-label">Quiet hours</span>
+      <span id="quiet-pill" class="ms-pill" style="margin-left:auto">Off</span>
+    </div>
+    <div class="ms-hint">
+      Block the auto-launch watcher during a recurring window — handy so the
+      mirror doesn't pop up at 3 a.m. just because your phone hit the Wi-Fi.
+      Manual launches from this page are unaffected.
+    </div>
+    <div class="ms-row" style="margin-top:8px">
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+        <input type="checkbox" id="quiet-enabled" />
+        Enable quiet hours
+      </label>
+      <span style="font-size:13px;color:#cbd5e1;margin-left:12px">From</span>
+      <input class="ms-input" id="quiet-start" type="time" style="max-width:130px" />
+      <span style="font-size:13px;color:#cbd5e1">to</span>
+      <input class="ms-input" id="quiet-end" type="time" style="max-width:130px" />
+      <button class="ms-btn primary" id="quiet-save-btn">Save</button>
+    </div>
+    <div id="quiet-hint" class="ms-hint"></div>
+    <div id="quiet-error" class="ms-error"></div>
+  </div>
+
+  <!-- 4. Recent devices -->
+  <div class="ms-section" id="recent-section">
+    <div class="ms-row">
+      <span class="ms-label">Recent devices</span>
+      <span id="watcher-pill" class="ms-pill" style="margin-left:auto">Watcher: idle</span>
+      <button class="ms-btn" id="recent-refresh-btn">Refresh</button>
+    </div>
+    <div id="watcher-line" class="ms-hint" style="margin-top:4px"></div>
+    <div id="recent-list" class="ms-list">
+      <div class="ms-empty">No remembered devices yet — they'll appear here after the first launch.</div>
+    </div>
+  </div>
+
+  <!-- 5. Launch / status -->
+  <div class="ms-section">
+    <div class="ms-row">
+      <span class="ms-label">5. Launch the mirror</span>
+      <span id="run-pill" class="ms-pill">Stopped</span>
+      <span id="audio-pill" class="ms-pill" title="Whether phone audio is being routed to the laptop speakers">Audio: off</span>
+      <button class="ms-btn danger" id="stop-btn" style="margin-left:auto" disabled>Stop</button>
+    </div>
+    <div class="ms-row" style="margin-top:8px">
+      <select class="ms-select" id="launch-serial"></select>
+      <select class="ms-select" id="launch-preset" style="max-width:200px">
+        <option value="default">Default (audio + clipboard)</option>
+        <option value="low-bitrate">Low bitrate (slow Wi-Fi)</option>
+        <option value="record">Record to ~/.phone-bridge/recordings</option>
+      </select>
+      <button class="ms-btn primary" id="launch-btn">Launch mirror</button>
+    </div>
+    <div class="ms-hint">
+      A native <code>scrcpy</code> window opens on the laptop desktop — it can't be
+      embedded in this browser. Click <em>Stop</em> here to close it.
+    </div>
+    <div id="run-error" class="ms-error"></div>
+    <div class="ms-log" id="run-log">scrcpy log will appear here…</div>
+  </div>
+
+  <!-- 6. Browser viewer (no scrcpy install required) -->
+  <div class="ms-section">
+    <div class="ms-row">
+      <span class="ms-label">6. Watch in a browser tab (no scrcpy install)</span>
+      <span id="mv-pill" class="ms-pill">Off</span>
+      <button class="ms-btn" id="mv-open-btn" style="margin-left:auto" disabled>Open viewer</button>
+    </div>
+    <div class="ms-hint">
+      Streams the phone screen as PNG frames over a WebSocket so any device on
+      the LAN can open <code>/mirror-view</code> and watch — no <code>scrcpy</code>
+      needed on the viewer's machine. Independent of the native window above.
+      Stops automatically when the server shuts down.
+    </div>
+    <div class="ms-row" style="margin-top:8px">
+      <select class="ms-select" id="mv-serial-select"></select>
+      <select class="ms-select" id="mv-fps-select" style="max-width:120px" title="Higher fps uses more CPU on both ends.">
+        <option value="3">3 fps</option>
+        <option value="6" selected>6 fps</option>
+        <option value="10">10 fps</option>
+        <option value="15">15 fps</option>
+      </select>
+      <button class="ms-btn primary" id="mv-start-btn">Start browser viewer</button>
+      <button class="ms-btn danger" id="mv-stop-btn" disabled>Stop</button>
+    </div>
+    <div id="mv-error" class="ms-error"></div>
+  </div>
+
+  <!-- Recordings library -->
+  <div class="ms-section" id="rec-section">
+    <div class="ms-row">
+      <span class="ms-label">📼 Recordings</span>
+      <span id="rec-count-pill" class="ms-pill" style="margin-left:auto">—</span>
+      <button class="ms-btn" id="rec-refresh-btn">Refresh</button>
+    </div>
+    <div class="ms-hint">
+      MP4s saved to <code>~/.phone-bridge/recordings/</code>. Click a row to
+      play it inline; the URL is share-able with anyone else who has the
+      bridge PIN on this LAN.
+    </div>
+    <div id="rec-list" class="ms-list">
+      <div class="ms-empty">Loading…</div>
+    </div>
+    <div id="rec-error" class="ms-error"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="/vendor/jsQR.js"></script>
+<script type="module" src="/js/mirror-setup.js"></script>
+</body>
+</html>

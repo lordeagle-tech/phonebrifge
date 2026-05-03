@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0d0d17" />
+  <title>Phone Bridge</title>
+  <link rel="stylesheet" href="/css/app.css?v=3" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- Login Page -->
+  <div id="login-page" class="page active">
+    <div class="login-card">
+      <div class="login-logo">💻</div>
+      <div class="login-title">Phone Bridge</div>
+      <div class="login-subtitle">Enter your access PIN</div>
+
+      <div class="pin-display" id="pin-display">
+        <div class="pin-dot" id="d0"></div>
+        <div class="pin-dot" id="d1"></div>
+        <div class="pin-dot" id="d2"></div>
+        <div class="pin-dot" id="d3"></div>
+        <div class="pin-dot" id="d4"></div>
+        <div class="pin-dot" id="d5"></div>
+      </div>
+
+      <div class="pin-pad">
+        <button class="pin-key" data-digit="1">1</button>
+        <button class="pin-key" data-digit="2">2</button>
+        <button class="pin-key" data-digit="3">3</button>
+        <button class="pin-key" data-digit="4">4</button>
+        <button class="pin-key" data-digit="5">5</button>
+        <button class="pin-key" data-digit="6">6</button>
+        <button class="pin-key" data-digit="7">7</button>
+        <button class="pin-key" data-digit="8">8</button>
+        <button class="pin-key" data-digit="9">9</button>
+        <button class="pin-key clear" id="pin-clear">⌫</button>
+        <button class="pin-key" data-digit="0">0</button>
+        <button class="pin-key submit" id="pin-submit">✓</button>
+      </div>
+
+      <div class="login-error" id="login-error"></div>
+    </div>
+  </div>
+
+  <!-- Home / Stats Page -->
+  <div id="home-page" class="page">
+    <div class="page-header">Dashboard</div>
+    <div class="page-sub" id="home-hostname">Loading...</div>
+
+    <div class="stat-grid" id="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">CPU</div>
+        <div class="stat-value" id="cpu-val">—</div>
+        <div class="stat-bar"><div class="stat-bar-fill" id="cpu-bar" style="width:0%"></div></div>
+        <div class="stat-sub" id="cpu-sub"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Memory</div>
+        <div class="stat-value" id="ram-val">—</div>
+        <div class="stat-bar"><div class="stat-bar-fill" id="ram-bar" style="width:0%"></div></div>
+        <div class="stat-sub" id="ram-sub"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Disk</div>
+        <div class="stat-value" id="disk-val">—</div>
+        <div class="stat-bar"><div class="stat-bar-fill" id="disk-bar" style="width:0%"></div></div>
+        <div class="stat-sub" id="disk-sub"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Battery</div>
+        <div class="stat-value" id="bat-val">—</div>
+        <div class="stat-bar"><div class="stat-bar-fill" id="bat-bar" style="width:0%"></div></div>
+        <div class="stat-sub" id="bat-sub"></div>
+      </div>
+      <div class="stat-full pair-card">
+        <div class="stat-label">Pair this phone</div>
+        <div class="pair-ip-row">
+          <div class="pair-ip-block">
+            <div class="pair-ip-sub">Phone IP on this Wi-Fi</div>
+            <div class="pair-ip" id="pair-ip">—</div>
+          </div>
+          <button class="btn primary" id="pair-copy-btn" disabled>Copy</button>
+        </div>
+        <div class="pair-hint" id="pair-hint">Detecting…</div>
+        <button class="btn" id="pair-qr-toggle" style="display:none">Show pairing QR</button>
+        <div class="pair-qr-area" id="pair-qr-area" style="display:none">
+          <div class="pair-qr-fields">
+            <input type="text" id="pair-qr-port" class="pair-input" placeholder="Pairing port (e.g. 41234)" inputmode="numeric" autocomplete="off" />
+            <input type="text" id="pair-qr-code" class="pair-input" placeholder="6-digit pairing code" inputmode="numeric" autocomplete="off" />
+          </div>
+          <div class="pair-qr-canvas-wrap">
+            <canvas id="pair-qr-canvas" width="220" height="220"></canvas>
+          </div>
+          <div class="pair-hint">Open the laptop's <code>/mirror-setup</code> page and scan this QR with your webcam, or read it off and type it in.</div>
+        </div>
+      </div>
+      <div class="stat-full notif-card">
+        <div class="notif-header">
+          <span class="stat-label" style="margin:0">Phone Notifications</span>
+          <span id="notif-status" class="muted-pill">connecting…</span>
+        </div>
+        <div class="notif-list" id="notif-list">
+          <div class="notif-empty">Loading…</div>
+        </div>
+      </div>
+
+      <div class="stat-full notif-card">
+        <div class="notif-header">
+          <span class="stat-label" style="margin:0">Messages</span>
+          <span id="sms-status" class="muted-pill">connecting…</span>
+        </div>
+        <label class="sms-toggle">
+          <input type="checkbox" id="sms-autocopy" checked />
+          <span>Auto-copy OTP codes to laptop clipboard</span>
+        </label>
+        <div class="notif-list" id="sms-list">
+          <div class="notif-empty">Loading…</div>
+        </div>
+      </div>
+
+      <div class="stat-full notif-card">
+        <div class="notif-header">
+          <span class="stat-label" style="margin:0">Photo auto-import</span>
+          <span id="photos-status" class="muted-pill">off</span>
+        </div>
+        <label class="sms-toggle">
+          <input type="checkbox" id="photos-enabled" />
+          <span>Auto-copy new phone photos to my laptop</span>
+        </label>
+        <div class="pair-ip-row" style="margin-top:8px">
+          <input type="text" id="photos-dest" class="pair-input" placeholder="Destination folder" autocomplete="off" spellcheck="false" style="flex:1" />
+          <button class="btn primary" id="photos-save-btn">Save</button>
+        </div>
+        <div class="pair-hint" id="photos-hint">Folder must be inside your home directory.</div>
+        <div class="notif-list" id="photos-recent">
+          <div class="notif-empty">Loading…</div>
+        </div>
+      </div>
+
+      <div class="stat-full call-card">
+        <div class="stat-label">Find my phone</div>
+        <select class="ms-select" id="ring-device" style="width:100%;margin-bottom:8px;display:none"></select>
+        <button class="btn primary call-btn" id="ring-btn">📢  Ring phone</button>
+        <div class="call-hint" id="ring-hint">Loud alarm on the phone, even on silent. Auto-stops after 30 s.</div>
+      </div>
+
+      <div class="stat-full call-card">
+        <div class="stat-label">Voice Call</div>
+        <button class="btn primary call-btn" id="call-btn">📞  Call laptop</button>
+        <div class="call-hint">Talks to whoever's near the laptop's <code>/viewer.html</code> page.</div>
+      </div>
+      <div class="stat-full">
+        <div class="stat-label">Network</div>
+        <div style="display:flex; gap:24px; margin-top:4px;">
+          <div>
+            <div style="font-size:11px;color:var(--muted)">↑ Sent</div>
+            <div style="font-size:18px;font-weight:700" id="net-sent">—</div>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--muted)">↓ Received</div>
+            <div style="font-size:18px;font-weight:700" id="net-recv">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Files Page -->
+  <div id="files-page" class="page">
+    <div class="page-header">Files</div>
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="files-toolbar">
+      <label class="btn primary" for="upload-input">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Upload
+      </label>
+      <input type="file" id="upload-input" multiple />
+      <button class="btn" id="select-toggle-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span id="select-toggle-label">Select</span>
+      </button>
+      <button class="btn" id="refresh-files-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Refresh
+      </button>
+    </div>
+    <div class="selection-bar" id="selection-bar" style="display:none">
+      <span class="selection-count" id="selection-count">0 selected</span>
+      <button class="btn" id="select-all-btn">All</button>
+      <button class="btn" id="select-clear-btn">Clear</button>
+      <button class="btn primary" id="download-selected-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download zip
+      </button>
+    </div>
+    <div class="file-list" id="file-list">
+      <div class="empty-state"><div class="empty-icon">📁</div>Loading...</div>
+    </div>
+  </div>
+
+  <!-- Terminal Page -->
+  <div id="terminal-page" class="page">
+    <div id="terminal-toolbar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" style="color:var(--accent2)"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      <span>Terminal</span>
+      <div class="term-mode" role="tablist">
+        <button class="term-mode-btn active" id="term-mode-laptop" data-mode="laptop">💻 Laptop</button>
+        <button class="term-mode-btn" id="term-mode-phone" data-mode="phone">📱 Phone</button>
+      </div>
+      <span id="term-status" class="disconnected">Disconnected</span>
+      <button class="btn" id="term-reconnect-btn" style="padding:6px 12px;font-size:12px">Reconnect</button>
+    </div>
+    <div id="terminal-container"></div>
+  </div>
+
+  <!-- Screen Mirror Page -->
+  <div id="screen-page" class="page">
+    <div class="screen-toolbar">
+      <span class="page-header" style="margin:0">Screen</span>
+      <span id="screen-status" class="disconnected">Stopped</span>
+      <div class="screen-controls">
+        <div class="slider-row">
+          <label>FPS <span id="screen-fps-val">10</span></label>
+          <input type="range" id="screen-fps" min="1" max="30" value="10" />
+        </div>
+        <div class="slider-row">
+          <label>Quality <span id="screen-quality-val">60</span></label>
+          <input type="range" id="screen-quality" min="20" max="95" value="60" />
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        <button class="btn secondary" id="screen-reset-zoom" style="display:none">Reset Zoom</button>
+        <button class="btn primary" id="screen-start-btn">Start</button>
+      </div>
+    </div>
+    <div class="screen-view">
+      <img id="screen-img" alt="Screen stream" />
+      <div id="screen-empty" class="screen-empty">
+        <div class="screen-empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="64" height="64">
+            <rect x="2" y="4" width="20" height="13" rx="2"/>
+            <path d="M8 21h8M12 17v4"/>
+            <circle cx="12" cy="10.5" r="2.2" fill="currentColor" opacity="0.35"/>
+          </svg>
+        </div>
+        <div class="screen-empty-title">Mirror your laptop screen</div>
+        <div class="screen-empty-sub">Tap below to begin streaming. Tap to click, long-press for right-click, pinch to zoom.</div>
+        <button class="btn primary screen-empty-btn" id="screen-empty-start">▶  Start streaming</button>
+      </div>
+      <div id="screen-loading" class="screen-loading hidden">
+        <div class="spinner"></div>
+        <div>Connecting…</div>
+      </div>
+      <div class="screen-hint">Tap = click · Long press = right click · Pinch to zoom</div>
+    </div>
+  </div>
+
+  <!-- Control Page: Touchpad / Keyboard / Clipboard -->
+  <div id="control-page" class="page">
+    <div class="ctrl-tabs">
+      <button class="ctrl-tab active" data-panel="touchpad-panel">Touchpad</button>
+      <button class="ctrl-tab" data-panel="kb-panel">Keyboard</button>
+      <button class="ctrl-tab" data-panel="clip-panel">Clipboard</button>
+    </div>
+
+    <div id="touchpad-panel" class="ctrl-panel active">
+      <div id="touchpad" class="touchpad">
+        <div class="touchpad-hint">Drag to move · Tap to click · 2-finger tap = right click · 2-finger drag = scroll</div>
+      </div>
+      <div class="touchpad-btns">
+        <button class="touchpad-btn" id="pad-left-btn">Left Click</button>
+        <button class="touchpad-btn" id="pad-right-btn">Right Click</button>
+      </div>
+      <div class="ctrl-reconnect-row">
+        <button class="btn" id="ctrl-reconnect-btn" style="font-size:12px;padding:6px 14px">Reconnect</button>
+      </div>
+    </div>
+
+    <div id="kb-panel" class="ctrl-panel">
+      <div class="special-keys">
+        <button class="special-key" data-key="Escape">Esc</button>
+        <button class="special-key" data-key="Tab">Tab</button>
+        <button class="special-key" data-key="ArrowUp">↑</button>
+        <button class="special-key" data-key="ArrowDown">↓</button>
+        <button class="special-key" data-key="ArrowLeft">←</button>
+        <button class="special-key" data-key="ArrowRight">→</button>
+        <button class="special-key" data-key="Home">Home</button>
+        <button class="special-key" data-key="End">End</button>
+        <button class="special-key" data-key="PageUp">PgUp</button>
+        <button class="special-key" data-key="PageDown">PgDn</button>
+        <button class="special-key" data-key="Delete">Del</button>
+        <button class="special-key" data-key="Backspace">⌫</button>
+      </div>
+      <textarea
+        id="kb-input"
+        class="kb-textarea"
+        placeholder="Type here to send keystrokes to your laptop..."
+        rows="4"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+      ></textarea>
+      <div class="kb-actions">
+        <button class="btn" id="kb-clear-btn">Clear</button>
+        <button class="btn primary" id="kb-send-btn">↵ Enter</button>
+      </div>
+    </div>
+
+    <div id="clip-panel" class="ctrl-panel">
+      <div class="clip-section">
+        <div class="clip-label">Laptop clipboard</div>
+        <div id="clip-text" class="clip-display">(not fetched yet)</div>
+        <div class="clip-actions">
+          <button class="btn" id="clip-fetch-btn">Fetch from laptop</button>
+          <button class="btn" id="clip-copy-btn">Copy to phone</button>
+        </div>
+      </div>
+      <div class="clip-section">
+        <div class="clip-label">Push to laptop</div>
+        <textarea
+          id="clip-input"
+          class="kb-textarea"
+          placeholder="Type or paste text here, then push to laptop..."
+          rows="3"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <div class="clip-actions">
+          <button class="btn primary" id="clip-push-btn">Push to laptop</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Activity Page -->
+  <div id="activity-page" class="page">
+    <div class="activity-toolbar">
+      <span class="page-header" style="margin:0">Activity</span>
+      <span id="activity-status" class="muted-pill">—</span>
+    </div>
+    <div class="activity-filters" id="activity-filters">
+      <button class="chip active" data-cat="all">All</button>
+      <button class="chip" data-cat="auth">Auth</button>
+      <button class="chip" data-cat="files">Files</button>
+      <button class="chip" data-cat="clipboard">Clipboard</button>
+      <button class="chip" data-cat="control">Control</button>
+      <button class="chip" data-cat="sms">SMS</button>
+      <button class="chip" data-cat="system">System</button>
+    </div>
+    <div class="activity-list" id="activity-list">
+      <div class="empty-state"><div class="empty-icon">📋</div>Loading...</div>
+    </div>
+  </div>
+
+  <!-- Bottom Nav -->
+  <nav id="nav" style="display:none">
+    <button class="nav-btn active" data-page="home-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      Stats
+    </button>
+    <button class="nav-btn" data-page="files-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      Files
+    </button>
+    <button class="nav-btn" data-page="terminal-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      Term
+    </button>
+    <button class="nav-btn" data-page="screen-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      Screen
+    </button>
+    <a class="nav-btn" href="/mirror-setup">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
+      Phones
+    </a>
+    <a class="nav-btn" href="/peer-control">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Remote PC
+    </a>
+    <button class="nav-btn" data-page="control-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+      Control
+    </button>
+    <button class="nav-btn" data-page="activity-page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Activity
+    </button>
+  </nav>
+
+  <!-- Machine picker pill (per-tab target) -->
+  <button id="target-pill" type="button" style="display:none">
+    <span class="target-pill-dot online"></span>
+    <span class="target-pill-label">→ this laptop</span>
+  </button>
+
+  <!-- Picker bottom sheet -->
+  <div id="target-sheet">
+    <div class="target-sheet-backdrop"></div>
+    <div class="target-sheet-card">
+      <div class="target-sheet-header">
+        <div class="target-sheet-title">Run this tab on…</div>
+        <button class="target-sheet-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <div id="target-sheet-list"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Incoming-call ringer (phone) -->
+<div id="call-ring" class="call-overlay" style="display:none">
+  <div class="call-card-modal ringing">
+    <div class="call-icon ring-pulse">📞</div>
+    <div class="call-status">Incoming call from laptop</div>
+    <div class="call-actions">
+      <button class="call-action-btn accept" id="call-accept-btn">✓  Accept</button>
+      <button class="call-action-btn end" id="call-decline-btn">✕  Decline</button>
+    </div>
+  </div>
+</div>
+
+<!-- Active-call overlay (phone) -->
+<div id="call-overlay" class="call-overlay" style="display:none">
+  <div class="call-card-modal">
+    <div class="call-icon">📞</div>
+    <div class="call-status" id="call-status">Calling…</div>
+    <div class="call-timer" id="call-timer"></div>
+    <div class="call-actions">
+      <button class="call-action-btn" id="call-mute-btn">🎙  Mute</button>
+      <button class="call-action-btn end" id="call-end-btn">✕  End call</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script type="module" src="/js/app.js?v=3"></script>
+</body>
+</html>
