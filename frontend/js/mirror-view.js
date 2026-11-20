@@ -1,17 +1,21 @@
 /**
  * Browser-based phone-mirror viewer.
  *
- * Connects to /ws/mirror?serial=...&token=... and renders incoming PNG
+ * Connects to /ws/mirror?serial=...&ticket=... and renders incoming PNG
  * frames into a <canvas>. Falls back gracefully if the capture session
  * isn't running, the device hasn't been picked, or the server returns an
  * "ended" sentinel after the user stops the mirror from any client.
  */
-import { initLogin, getToken, checkAuth, setOnSessionLost } from "./auth.js";
+import {
+  initLogin, getToken, checkAuth, setOnSessionLost,
+  openTicketedWebSocket,
+} from "./auth.js";
 import { showToast } from "./utils.js";
 
 const $ = (id) => document.getElementById(id);
 
 let ws = null;
+let videoWsPending = false;
 let reconnectTimer = null;
 let frameCount = 0;
 let fpsTimer = null;
@@ -54,6 +58,12 @@ function hideEmpty() { $("mv-empty").classList.add("hidden"); }
 function paramSerial() {
   const u = new URL(window.location.href);
   return (u.searchParams.get("serial") || "").trim();
+}
+
+function paramFps() {
+  const raw = new URL(window.location.href).searchParams.get("fps");
+  const fps = Number.parseInt(raw || "6", 10);
+  return Number.isFinite(fps) ? Math.max(1, Math.min(15, fps)) : 6;
 }
 
 async function pickSerial() {
@@ -483,7 +493,8 @@ function configureDecoderFromHello(codecHint) {
   videoBootstrapNals = out;
 }
 
-function connect() {
+async function connect() {
+  if (videoWsPending) return;
   if (!currentSerial) {
     setStatus("no device", "warn");
     showEmpty(
@@ -494,13 +505,22 @@ function connect() {
     return;
   }
   $("mv-serial").textContent = currentSerial;
-  const token = getToken();
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${window.location.host}/ws/mirror`
-    + `?serial=${encodeURIComponent(currentSerial)}`
-    + `&token=${encodeURIComponent(token)}`;
+    + `?serial=${encodeURIComponent(currentSerial)}`;
+  const serialAtStart = currentSerial;
   setStatus("connecting…");
-  ws = new WebSocket(url);
+  videoWsPending = true;
+  try {
+    ws = await openTicketedWebSocket(url);
+  } catch {
+    videoWsPending = false;
+    setStatus("authorization failed", "error");
+    scheduleReconnect();
+    return;
+  }
+  videoWsPending = false;
+  if (serialAtStart !== currentSerial) { ws.close(); ws = null; return; }
   // ArrayBuffer is faster to inspect (we need to read the first byte
   // of each NAL) than Blob, so prefer it for h264. For PNG mode we
   // still convert to Blob below — Image() loads from blob URLs.
@@ -781,14 +801,13 @@ function scheduleChunk(buffer) {
   audioNextStart += ab.duration;
 }
 
-function audioWsUrl(serial, token) {
+function audioWsUrl(serial) {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/ws/mirror-audio`
-    + `?serial=${encodeURIComponent(serial)}`
-    + `&token=${encodeURIComponent(token)}`;
+    + `?serial=${encodeURIComponent(serial)}`;
 }
 
-function connectAudioWs() {
+async function connectAudioWs() {
   if (!currentSerial) return;
   const ctx = ensureAudioCtx();
   if (!ctx) return;
@@ -796,8 +815,14 @@ function connectAudioWs() {
   // user gesture that clicked the audio button.
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
   audioNextStart = 0;
-  const url = audioWsUrl(currentSerial, getToken());
-  audioWs = new WebSocket(url);
+  const serialAtStart = currentSerial;
+  try {
+    audioWs = await openTicketedWebSocket(audioWsUrl(currentSerial));
+  } catch {
+    showToast("Could not authorize phone audio stream.");
+    return;
+  }
+  if (serialAtStart !== currentSerial) { audioWs.close(); audioWs = null; return; }
   audioWs.binaryType = "arraybuffer";
 
   audioWs.onmessage = (ev) => {
@@ -1490,7 +1515,7 @@ async function startViewer() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${getToken()}`,
         },
-        body: JSON.stringify({ serial: currentSerial, mode: wantMode }),
+        body: JSON.stringify({ serial: currentSerial, fps: paramFps(), mode: wantMode }),
       });
       if (!res.ok) {
         // eslint-disable-next-line no-console

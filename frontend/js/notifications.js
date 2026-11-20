@@ -1,7 +1,7 @@
 // Mirrors the phone's active notifications inside the dashboard card.
 // Uses a WebSocket for live updates, with a one-shot REST fetch as the
 // initial render so the card is never blank while the WS handshake runs.
-import { getToken } from "./auth.js";
+import { getToken, openTicketedWebSocket } from "./auth.js";
 import { showToast } from "./utils.js";
 
 let ws = null;
@@ -162,13 +162,13 @@ async function fetchOnce() {
   } catch { /* ignore — WS will fill in */ }
 }
 
-function connect() {
+async function connect() {
   const token = getToken();
   if (!token) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${proto}//${location.host}/ws/notifications?token=${encodeURIComponent(token)}`;
+  const url = `${proto}//${location.host}/ws/notifications`;
   try {
-    ws = new WebSocket(url);
+    ws = await openTicketedWebSocket(url);
   } catch {
     scheduleReconnect();
     return;

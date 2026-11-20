@@ -1,5 +1,5 @@
 """
-Rotating 6-digit pairing code for linking secondary laptops.
+Rotating 8-digit pairing code for linking secondary laptops.
 
 The code is short-lived (5 min by default) so a peer that's about to
 be paired must read the *current* one off the main laptop's banner /
@@ -18,11 +18,20 @@ import time
 from typing import Optional, Tuple
 
 ROTATE_SECONDS = 5 * 60  # 5 minutes
+CODE_DIGITS = 8
 
 _lock = threading.Lock()
 _current: Optional[str] = None
 _current_started_at: float = 0.0
 _previous: Optional[str] = None  # accepted within one extra window
+
+
+def _new_code(*exclude: Optional[str]) -> str:
+    while True:
+        candidate = f"{secrets.randbelow(10**CODE_DIGITS):0{CODE_DIGITS}d}"
+        if not any(value and secrets.compare_digest(candidate, value)
+                   for value in exclude):
+            return candidate
 
 
 def _maybe_rotate_locked(now: float) -> None:
@@ -34,7 +43,7 @@ def _maybe_rotate_locked(now: float) -> None:
     global _current, _current_started_at, _previous
     if _current is None:
         _previous = None
-        _current = f"{secrets.randbelow(10**6):06d}"
+        _current = _new_code()
         _current_started_at = now
         return
     elapsed = now - _current_started_at
@@ -48,7 +57,7 @@ def _maybe_rotate_locked(now: float) -> None:
         _previous = None
     else:
         _previous = _current
-    _current = f"{secrets.randbelow(10**6):06d}"
+    _current = _new_code(_current, _previous)
     _current_started_at = now
 
 
@@ -67,7 +76,7 @@ def verify(code: str) -> bool:
     """Accept the current OR the immediately-previous code. Constant
     time on the comparison itself; the structural checks (length,
     digits-only) leak nothing useful."""
-    if not code or len(code) != 6 or not code.isdigit():
+    if not code or len(code) != CODE_DIGITS or not code.isdigit():
         return False
     # Force a rotation tick so a code that expired N minutes ago and
     # hasn't been re-checked since can't slip through. The rotate
@@ -83,3 +92,23 @@ def verify(code: str) -> bool:
     if prev and secrets.compare_digest(prev, code):
         return True
     return False
+
+
+def consume(code: str) -> bool:
+    """Atomically accept a current/previous code once, then rotate it."""
+    global _current, _current_started_at, _previous
+    if not code or len(code) != CODE_DIGITS or not code.isdigit():
+        return False
+    now = time.time()
+    with _lock:
+        _maybe_rotate_locked(now)
+        cur = _current or ""
+        prev = _previous or ""
+        current_match = bool(cur) and secrets.compare_digest(cur, code)
+        previous_match = bool(prev) and secrets.compare_digest(prev, code)
+        if not (current_match or previous_match):
+            return False
+        _current = _new_code(cur, prev)
+        _current_started_at = now
+        _previous = None
+        return True

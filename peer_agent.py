@@ -1,8 +1,8 @@
 """
 ``python run.py peer`` — secondary-laptop agent.
 
-Pairs once against the main bridge using its rotating 6-digit pair
-code, stores the long-lived per-peer secret in
+Pairs once against the main bridge using its rotating 8-digit pair
+code and user-verified TLS fingerprint, stores the long-lived per-peer secret in
 ``~/.phone-bridge/peer_link.json`` (mode 600), then maintains a
 heartbeat WebSocket to the main bridge so it shows up as "online" in
 ``GET /api/peers``. Re-runs without ``--pair-code`` reuse the saved
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import platform
@@ -42,18 +44,50 @@ LINK_FILE = STATE_DIR / "peers.json"
 HEARTBEAT_SECONDS = 5.0
 RECONNECT_INITIAL = 1.0
 RECONNECT_MAX = 30.0
-# Default port for the peer's local HTTP server (screen + input). The
+# Default port for the peer's local HTTPS server (screen + input). The
 # main bridge proxies through this; the browser never hits it directly.
 DEFAULT_PEER_PORT = 8766
 
 
-def _ssl_ctx_insecure() -> ssl.SSLContext:
-    # The main bridge's TLS cert is self-signed; this is LAN-only and
-    # the peer secret/code is the real auth.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+def _fetch_main_certificate(main_url: str) -> Tuple[str, str]:
+    """Fetch a certificate without credentials; caller must verify its pin."""
+    parsed = urlparse(main_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise SystemExit("Peer pairing requires an HTTPS main-bridge URL.")
+    port = parsed.port or 443
+    ctx = ssl._create_unverified_context()
+    try:
+        raw = socket.create_connection((parsed.hostname, port), timeout=8.0)
+        with ctx.wrap_socket(raw, server_hostname=parsed.hostname) as tls:
+            der = tls.getpeercert(binary_form=True)
+    except OSError as exc:
+        raise SystemExit(f"Could not read the main bridge certificate: {exc}")
+    if not der:
+        raise SystemExit("The main bridge did not present a TLS certificate.")
+    return ssl.DER_cert_to_PEM_cert(der), hashlib.sha256(der).hexdigest()
+
+
+def _pin_main_certificate(main_url: str, expected: str) -> str:
+    pem, actual = _fetch_main_certificate(main_url)
+    expected_hex = "".join(c for c in expected.lower() if c in "0123456789abcdef")
+    if len(expected_hex) != 64 or not hmac.compare_digest(actual, expected_hex):
+        raise SystemExit("Main bridge TLS fingerprint mismatch; refusing to send pairing credentials.")
+    return pem
+
+
+def _ssl_ctx_for_main(main_url: str, pinned_cert_pem: Optional[str] = None):
+    """Use system CA verification or trust only the user-pinned self-signed cert."""
+    if not main_url.startswith("https://"):
+        raise SystemExit("Peer connections require HTTPS/WSS; plain HTTP is not supported.")
+    if pinned_cert_pem:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(cadata=pinned_cert_pem)
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        # The exact certificate is trusted by its fingerprint, even when the
+        # user connects through a LAN IP not present in its DNS SAN entries.
+        ctx.check_hostname = False
+        return ctx
+    return ssl.create_default_context()
 
 
 def _normalise_main(url: str) -> str:
@@ -82,12 +116,15 @@ def _load_link() -> Optional[Dict[str, Any]]:
         return None
 
 
-def _http_post(url: str, body: Dict[str, Any], timeout: float = 10.0) -> Dict[str, Any]:
+def _http_post(url: str, body: Dict[str, Any], timeout: float = 10.0,
+               ssl_ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
     data = json.dumps(body).encode("utf-8")
     req = Request(url, data=data, method="POST",
                   headers={"Content-Type": "application/json"})
-    ctx = _ssl_ctx_insecure() if url.startswith("https://") else None
-    with urlopen(req, timeout=timeout, context=ctx) as resp:
+    if not url.startswith("https://"):
+        raise SystemExit("Pairing credentials may only be sent over HTTPS.")
+    with urlopen(req, timeout=timeout,
+                 context=ssl_ctx or ssl.create_default_context()) as resp:
         return json.loads(resp.read().decode("utf-8") or "{}")
 
 
@@ -99,7 +136,11 @@ def _ws_url(main_url: str) -> str:
     return f"{scheme}://{netloc}/ws/peer"
 
 
-def _pair(main_url: str, code: str, peer_port: int) -> Dict[str, Any]:
+def _pair(main_url: str, code: str, peer_port: int,
+          fingerprint: Optional[str] = None) -> Dict[str, Any]:
+    pinned_cert_pem = (_pin_main_certificate(main_url, fingerprint)
+                       if fingerprint else None)
+    ssl_ctx = _ssl_ctx_for_main(main_url, pinned_cert_pem)
     body = {
         "code": code,
         "hostname": socket.gethostname(),
@@ -107,7 +148,7 @@ def _pair(main_url: str, code: str, peer_port: int) -> Dict[str, Any]:
         "peer_port": peer_port,
     }
     try:
-        resp = _http_post(f"{main_url}/api/peers/pair", body)
+        resp = _http_post(f"{main_url}/api/peers/pair", body, ssl_ctx=ssl_ctx)
     except HTTPError as e:
         try:
             detail = json.loads(e.read().decode("utf-8")).get("detail", e.reason)
@@ -127,6 +168,8 @@ def _pair(main_url: str, code: str, peer_port: int) -> Dict[str, Any]:
         "peer_port": peer_port,
         "paired_at": time.time(),
     }
+    if pinned_cert_pem:
+        link["main_cert_pem"] = pinned_cert_pem
     _atomic_write_link(link)
     return link
 
@@ -139,7 +182,7 @@ def _print_banner(link: Dict[str, Any]) -> None:
     print(f"  Peer ID     : {link['id']}")
     print(f"  Hostname    : {link['hostname']}")
     print(f"  Peer port   : {link.get('peer_port', DEFAULT_PEER_PORT)} "
-          f"(LAN HTTP for screen + input)")
+          f"(HTTPS for screen + input)")
     print(f"  Link file   : {LINK_FILE}")
     print("\n  Heartbeating once every 5 s. Browser-control requests")
     print("  flow through the main bridge — nothing else can hit the")
@@ -148,10 +191,10 @@ def _print_banner(link: Dict[str, Any]) -> None:
     print("=" * 52 + "\n")
 
 
-async def _heartbeat_loop(link: Dict[str, Any]) -> None:
+async def _heartbeat_loop(link: Dict[str, Any], peer_cert_pem: str) -> None:
     """Maintain the heartbeat WS forever, reconnecting with backoff."""
     url = _ws_url(link["main"])
-    ssl_ctx = _ssl_ctx_insecure() if url.startswith("wss://") else None
+    ssl_ctx = _ssl_ctx_for_main(link["main"], link.get("main_cert_pem"))
     delay = RECONNECT_INITIAL
     # Imported lazily so unit-testing the heartbeat doesn't drag in
     # mss/pynput. ``None`` (NOT an empty list) means "couldn't
@@ -172,6 +215,9 @@ async def _heartbeat_loop(link: Dict[str, Any]) -> None:
                     "type": "hello",
                     "id": link["id"],
                     "secret": link["secret"],
+                    # The main bridge stores this certificate from the
+                    # authenticated WSS channel and pins it for proxy traffic.
+                    "peer_cert": peer_cert_pem,
                     # Re-announce our peer-server port on every hello
                     # so the main bridge's registry stays in sync if
                     # we restart on a different port.
@@ -223,15 +269,20 @@ async def _heartbeat_loop(link: Dict[str, Any]) -> None:
 
 
 async def _run_all(link: Dict[str, Any]) -> None:
-    """Run the heartbeat + the peer HTTP server concurrently. If
+    """Run the heartbeat + the peer HTTPS/WSS server concurrently. If
     either crashes irrecoverably we cancel both so the user sees the
     error and the agent restarts cleanly."""
     from peer_server import serve as _serve_peer
+    from server.tls import ensure_cert
+
+    cert_file, key_file, _ = ensure_cert()
+    peer_cert_pem = Path(cert_file).read_text(encoding="ascii")
     port = int(link.get("peer_port") or DEFAULT_PEER_PORT)
     tasks = [
-        asyncio.create_task(_heartbeat_loop(link), name="heartbeat"),
+        asyncio.create_task(_heartbeat_loop(link, peer_cert_pem), name="heartbeat"),
         asyncio.create_task(_serve_peer(link["secret"], host="0.0.0.0",
-                                        port=port),
+                                        port=port, certfile=str(cert_file),
+                                        keyfile=str(key_file)),
                             name="peer-server"),
     ]
     try:
@@ -260,10 +311,13 @@ def main(argv: Optional[list] = None) -> int:
                         help="Main bridge URL, e.g. https://192.168.1.42:8765 "
                              "(required on first run; remembered after).")
     parser.add_argument("--pair-code", default=None,
-                        help="6-digit pair code shown on the main bridge "
+                        help="8-digit pair code shown on the main bridge "
                              "banner (required on first run).")
+    parser.add_argument("--fingerprint", default=None,
+                        help="SHA-256 fingerprint shown by the main bridge; "
+                             "required when pairing to its self-signed HTTPS certificate.")
     parser.add_argument("--peer-port", type=int, default=DEFAULT_PEER_PORT,
-                        help=f"Local TCP port for screen + input HTTP "
+                        help=f"Local TCP port for screen + input HTTPS "
                              f"(default: {DEFAULT_PEER_PORT}). The main "
                              f"bridge proxies through this port.")
     parser.add_argument("--re-pair", action="store_true",
@@ -278,7 +332,7 @@ def main(argv: Optional[list] = None) -> int:
         if not args.main or not args.pair_code:
             parser.error("first-time pairing needs --main URL and --pair-code CODE")
         link = _pair(_normalise_main(args.main), args.pair_code,
-                     args.peer_port)
+                     args.peer_port, args.fingerprint)
     else:
         link = saved
         changed = False
@@ -289,6 +343,14 @@ def main(argv: Optional[list] = None) -> int:
             if new_main != link.get("main"):
                 link["main"] = new_main
                 changed = True
+        if args.fingerprint:
+            link["main_cert_pem"] = _pin_main_certificate(
+                link["main"], args.fingerprint)
+            changed = True
+        elif not link.get("main_cert_pem"):
+            print("[security] no stored TLS pin; if the main bridge uses its "
+                  "self-signed certificate, re-run with --fingerprint from "
+                  "the main bridge banner.", flush=True)
         if args.peer_port and int(link.get("peer_port") or 0) != args.peer_port:
             link["peer_port"] = int(args.peer_port)
             changed = True

@@ -6,7 +6,10 @@
  * through to the chosen peer by the main bridge — the browser never
  * sees the peer's IP, port or secret.
  */
-import { initLogin, getToken, checkAuth, setOnSessionLost } from "./auth.js";
+import {
+  initLogin, getToken, checkAuth, setOnSessionLost,
+  ticketedUrl, openTicketedWebSocket,
+} from "./auth.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -108,16 +111,23 @@ function renderPeerOptions() {
 }
 
 function streamUrl(peerId) {
-  const tok = encodeURIComponent(getToken());
-  return `/api/peers/${peerId}/screen.mjpeg?token=${tok}&fps=15&quality=65`;
+  return `/api/peers/${peerId}/screen.mjpeg?fps=15&quality=65`;
 }
 
-function reloadStream() {
+async function reloadStream() {
   if (!currentPeer) return;
+  const peerId = currentPeer;
   const img = $("pc-img");
   // Cache-bust so the browser actually re-issues the MJPEG GET; without
   // this the stale stream stays in place if the URL didn't change.
-  img.src = streamUrl(currentPeer) + `&t=${Date.now()}`;
+  try {
+    const url = await ticketedUrl(streamUrl(peerId) + `&t=${Date.now()}`);
+    if (currentPeer !== peerId) return;
+    img.src = url;
+  } catch (_) {
+    setStatus("stream authorization failed", "danger");
+    return;
+  }
   img.classList.add("live");
   hideOverlay();
 }
@@ -203,13 +213,17 @@ function stopFpsMeter() {
 }
 
 // ---- Input forwarding -----------------------------------------------
-function startInput(peerId) {
-  const tok = encodeURIComponent(getToken());
+async function startInput(peerId) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${proto}://${location.host}/ws/peers/${peerId}/input?token=${tok}`;
+  const url = `${proto}://${location.host}/ws/peers/${peerId}/input`;
   inputWsClosing = false;
   try {
-    inputWs = new WebSocket(url);
+    const socket = await openTicketedWebSocket(url);
+    if (currentPeer !== peerId || inputWsClosing) {
+      socket.close();
+      return;
+    }
+    inputWs = socket;
   } catch (_) {
     setStatus("input failed", "danger");
     return;

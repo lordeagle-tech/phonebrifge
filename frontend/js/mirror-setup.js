@@ -1,5 +1,12 @@
-import { initLogin, getToken, checkAuth, setOnSessionLost } from "./auth.js";
+import { initLogin, getToken, checkAuth, setOnSessionLost, ticketedUrl } from "./auth.js";
 import { showToast } from "./utils.js";
+import {
+  chooseRecoveryPreset,
+  MAX_AUTO_RECOVERY_ATTEMPTS,
+  MirrorRecoveryGuard,
+  recoveryDelay,
+  shouldPauseAutoRecovery,
+} from "./mirror-recovery.mjs";
 
 const $ = (id) => document.getElementById(id);
 
@@ -7,6 +14,17 @@ let statusTimer = null;
 let qrTimer = null;
 let recentTimer = null;
 const serialNames = new Map(); // serial -> friendly name (from /devices)
+let nativeMirrorRunning = false;
+let watchedMirrorSerial = "";
+let watchedMirrorPreset = "";
+let mirrorLinkLost = false;
+let mirrorRecoveryTimer = null;
+let mirrorRecoveryBusy = false;
+let mirrorRecoveryAttempts = 0;
+const mirrorRecoveryGuard = new MirrorRecoveryGuard();
+let lastDeviceCheckAt = 0;
+let lastDeviceCheckSerial = "";
+let cachedPhoneDevice = null;
 
 function authHeaders() {
   const t = getToken();
@@ -127,11 +145,13 @@ function devTagFor(state) {
 function renderDevices(devices) {
   const list = $("dev-list");
   const select = $("launch-serial");
+  const previousSerial = select.value;
   list.innerHTML = "";
   select.innerHTML = "";
   if (!devices.length) {
     list.innerHTML = `<div class="ms-empty">No devices found. Plug in over USB (with USB debugging on) or pair wirelessly below.</div>`;
     select.innerHTML = `<option value="">(no devices)</option>`;
+    applyPhonePreferences("");
     return;
   }
   for (const d of devices) {
@@ -147,18 +167,19 @@ function renderDevices(devices) {
     `;
     list.appendChild(row);
 
-    if (d.state === "device") {
-      const opt = document.createElement("option");
-      opt.value = d.serial;
-      opt.textContent = `${d.name} — ${d.serial}`;
-      opt.dataset.name = d.name;
-      select.appendChild(opt);
-      serialNames.set(d.serial, d.name);
-    }
+    const opt = document.createElement("option");
+    opt.value = d.serial;
+    opt.textContent = `${d.name} — ${d.serial} · ${tag.text}`;
+    opt.dataset.name = d.name;
+    select.appendChild(opt);
+    serialNames.set(d.serial, d.name);
   }
   if (!select.options.length) {
-    select.innerHTML = `<option value="">(no ready devices — accept the USB-debug prompt on the phone)</option>`;
+    select.innerHTML = `<option value="">(no devices — check USB/Wi-Fi connection)</option>`;
+  } else if ([...select.options].some((opt) => opt.value === previousSerial)) {
+    select.value = previousSerial;
   }
+  applyPhonePreferences(select.value);
 }
 
 async function detectDevices(showSpinner = true) {
@@ -168,12 +189,198 @@ async function detectDevices(showSpinner = true) {
   if (showSpinner) btn.disabled = true;
   try {
     const r = await api("/api/scrcpy/devices");
-    renderDevices(r.devices || []);
+    const devices = r.devices || [];
+    renderDevices(devices);
+    const serial = $("launch-serial").value;
+    const device = devices.find((d) => d.serial === serial) || null;
+    cachedPhoneDevice = device;
+    lastDeviceCheckSerial = serial;
+    lastDeviceCheckAt = Date.now();
+    paintPhoneLink(serial, device);
+    return devices;
   } catch (e) {
     errEl.textContent = `Could not list devices: ${e.message}`;
     renderDevices([]);
+    cachedPhoneDevice = null;
+    lastDeviceCheckSerial = "";
+    paintPhoneLink("", null);
+    return [];
   } finally {
     btn.disabled = false;
+  }
+}
+
+function keepAwakeEnabled(serial) {
+  if (!serial) return false;
+  try { return localStorage.getItem(`pb.keepAwake.${serial}`) === "1"; }
+  catch { return false; }
+}
+
+const VALID_MIRROR_PRESETS = new Set(["fullscreen", "default", "low-bitrate", "record"]);
+
+function savedMirrorPreset(serial) {
+  if (!serial) return "";
+  try {
+    const preset = localStorage.getItem(`pb.mirrorPreset.${serial}`) || "";
+    return VALID_MIRROR_PRESETS.has(preset) ? preset : "";
+  } catch { return ""; }
+}
+
+function saveMirrorPreset(serial, preset) {
+  if (!serial || !VALID_MIRROR_PRESETS.has(preset)) return;
+  try { localStorage.setItem(`pb.mirrorPreset.${serial}`, preset); }
+  catch { /* browser preference storage is optional */ }
+}
+
+function applyPhonePreferences(serial) {
+  const preset = savedMirrorPreset(serial) || "fullscreen";
+  const select = $("launch-preset");
+  if ([...select.options].some((opt) => opt.value === preset)) select.value = preset;
+  const name = serialNames.get(serial) || serial;
+  $("phone-prefs-note").textContent = keepAwakeEnabled(serial)
+    ? `Keep-awake is enabled for ${name} while charging; it stays enabled until you switch it Off.`
+    : `Mirror mode is remembered for ${name}. Keep-awake is off.`;
+}
+
+function phoneLinkGuidance(serial, device) {
+  if (!serial) return "Select a phone to see its connection and per-phone controls.";
+  if (device && device.state === "unauthorized") {
+    return "Unlock the phone, accept the Android debugging prompt, and optionally tick “Always allow from this computer”.";
+  }
+  if (device && device.state === "offline") {
+    return device.wireless
+      ? "Wireless ADB is offline. Check both devices are on the same Wi-Fi, enable Wireless debugging, then reconnect or pair again if its port changed."
+      : "ADB sees the USB device as offline. Reconnect the data cable, unlock the phone, and confirm USB debugging is enabled.";
+  }
+  if (!device) {
+    return "Phone not listed by ADB. Check the USB data cable or same-Wi-Fi connection, enable debugging, then use Detect devices.";
+  }
+  return device.wireless
+    ? "ADB is authorized over Wi-Fi. Keep Wireless debugging enabled and both devices on the same network."
+    : "ADB is authorized over USB. Use a data-capable cable and keep USB debugging enabled.";
+}
+
+function scrcpyErrorGuidance(message) {
+  const text = String(message || "").toLowerCase();
+  if (text.includes("unauthorized") || text.includes("not authorized")) {
+    return "Unlock the phone and approve its Android debugging prompt.";
+  }
+  if (text.includes("scrcpy is not installed") || text.includes("adb is not installed")) {
+    return "Install the missing dependency from section 1, then select Recheck.";
+  }
+  if (text.includes("offline") || text.includes("device not found") || text.includes("no devices")) {
+    return "Reconnect the USB data cable or check Wireless debugging and the same Wi-Fi network, then select Detect devices.";
+  }
+  if (text.includes("timed out") || text.includes("timeout") || text.includes("connection refused")
+      || text.includes("failed to connect")) {
+    return "For Wi-Fi, confirm both devices share a network and Wireless debugging is on; re-pair if Android assigned a new port.";
+  }
+  if (text.includes("cannot open display") || text.includes("x11") || text.includes("wayland")) {
+    return "Launch Phone Bridge from the Parrot desktop session so scrcpy can access its graphical display.";
+  }
+  return "Check the phone-link indicator and scrcpy log below for the next diagnostic clue.";
+}
+
+function paintPhoneLink(serial, device) {
+  const pill = $("phone-link-pill");
+  const ready = !!(device && device.state === "device");
+  pill.classList.remove("ok", "warn", "danger");
+  if (!serial) {
+    pill.textContent = "Phone link: select a device";
+    pill.classList.add("warn");
+  } else if (ready) {
+    const transport = device.wireless ? "Wi-Fi" : "USB";
+    pill.textContent = `${device.name || serial} · ${transport} connected`;
+    pill.classList.add("ok");
+  } else if (device && device.state === "unauthorized") {
+    pill.textContent = "ADB permission needed · accept the prompt on phone";
+    pill.classList.add("warn");
+  } else if (device && device.state === "offline") {
+    pill.textContent = "Phone link offline · retrying…";
+    pill.classList.add("danger");
+  } else {
+    pill.textContent = "Phone not detected · reconnect or check cable/Wi-Fi";
+    pill.classList.add("danger");
+  }
+  document.querySelectorAll("[data-phone-action]").forEach((btn) => {
+    btn.disabled = !ready;
+  });
+  $("phone-awake-btn").disabled = !ready;
+  $("phone-rotation-restore-btn").disabled = !ready;
+  $("phone-reconnect-btn").disabled = !serial || (ready && nativeMirrorRunning);
+  const awake = keepAwakeEnabled(serial);
+  $("phone-awake-btn").textContent = `Keep awake while charging: ${awake ? "On" : "Off"}`;
+  $("phone-link-detail").textContent = phoneLinkGuidance(serial, device);
+  const label = device && (device.name || serial) || serial;
+  $("phone-prefs-note").textContent = awake
+    ? `Keep-awake is enabled for ${label} while charging; it stays enabled until you switch it Off.`
+    : `Keep-awake is off for ${label}. Mirror mode is saved per phone.`;
+}
+
+async function refreshPhoneLink(serial, force = false) {
+  const now = Date.now();
+  if (!serial) {
+    cachedPhoneDevice = null;
+    lastDeviceCheckSerial = "";
+    paintPhoneLink("", null);
+    return null;
+  }
+  if (!force && serial === lastDeviceCheckSerial && now - lastDeviceCheckAt < 4000) {
+    paintPhoneLink(serial, cachedPhoneDevice);
+    return cachedPhoneDevice;
+  }
+  lastDeviceCheckAt = now;
+  lastDeviceCheckSerial = serial;
+  try {
+    const r = await api("/api/scrcpy/devices");
+    const device = (r.devices || []).find((d) => d.serial === serial) || null;
+    cachedPhoneDevice = device;
+    if (nativeMirrorRunning && (!device || device.state !== "device")) {
+      mirrorLinkLost = true;
+    }
+    paintPhoneLink(serial, device);
+    return device;
+  } catch (e) {
+    cachedPhoneDevice = null;
+    paintPhoneLink(serial, null);
+    $("phone-link-detail").textContent = `ADB status request failed: ${e.message}. Check that Phone Bridge is running and retry Detect devices.`;
+    $("phone-action-status").textContent = `Could not check phone link: ${e.message}`;
+    return null;
+  }
+}
+
+async function phoneDeviceAction(action) {
+  const serial = watchedMirrorSerial || $("launch-serial").value;
+  const status = $("phone-action-status");
+  if (!serial) {
+    status.textContent = "Select or connect a phone first.";
+    return null;
+  }
+  try {
+    const result = await api("/api/scrcpy/device-action", {
+      method: "POST",
+      body: JSON.stringify({ serial, action }),
+    });
+    if (action === "awake_on" || action === "awake_off") {
+      try { localStorage.setItem(`pb.keepAwake.${serial}`, action === "awake_on" ? "1" : "0"); }
+      catch { /* preference is cosmetic; ADB action already succeeded */ }
+      paintPhoneLink(serial, cachedPhoneDevice);
+      status.textContent = action === "awake_on"
+        ? "Phone will stay awake while connected to power."
+        : "Keep-awake while charging is off.";
+    } else if (action === "rotate") {
+      status.textContent = `Phone rotated to ${result.orientation}. Original rotation saved; Restore rotation is available, and Stop restores it automatically.`;
+    } else if (action === "rotate_restore") {
+      status.textContent = result.restored
+        ? `Original rotation restored${result.auto_rotate ? " with Auto-rotate on" : " with Auto-rotate off"}.`
+        : (result.message || "No saved rotation setting to restore.");
+    } else {
+      status.textContent = `${action === "recents" ? "Recent apps" : action[0].toUpperCase() + action.slice(1)} sent to phone.`;
+    }
+    return result;
+  } catch (e) {
+    status.textContent = `Phone action failed: ${e.message}`;
+    return null;
   }
 }
 
@@ -224,8 +431,14 @@ async function loadRecent() {
       const row = document.createElement("div");
       row.className = "ms-dev";
       const when = d.last_used ? new Date(d.last_used * 1000).toLocaleString() : "";
-      const presetOpts = ["default", "low-bitrate", "record"]
-        .map((p) => `<option value="${p}"${(d.auto_preset || "default") === p ? " selected" : ""}>${p}</option>`)
+      const presetOpts = [
+        ["fullscreen", "Full screen"],
+        ["default", "Windowed"],
+        ["low-bitrate", "Low bitrate"],
+        ["record", "Record"],
+      ].map(([p, label]) =>
+        `<option value="${p}"${(d.auto_preset || "default") === p ? " selected" : ""}>${label}</option>`
+      )
         .join("");
       const lastAttempt = d.last_attempt
         ? `last attempt ${fmtAttempt(d.last_attempt)} — ${escapeHtml(d.last_outcome || "unknown")}`
@@ -495,27 +708,135 @@ async function forgetDevice(serial) {
   }
 }
 
-async function reconnectAndLaunch(serial) {
-  // Wireless serials look like "ip:port" — re-issue adb connect first.
-  if (serial.includes(":") && !serial.startsWith("emulator-")) {
-    const [host, port] = serial.split(":");
-    try {
-      await api("/api/scrcpy/connect", {
-        method: "POST",
-        body: JSON.stringify({ host, port: Number(port) }),
-      });
-    } catch (e) {
-      showToast(`Connect failed: ${e.message}`);
-      return;
+async function reconnectAndLaunch(serial, { automatic = false } = {}) {
+  if (!serial) {
+    $("phone-action-status").textContent = "Select a phone before reconnecting.";
+    return false;
+  }
+  if (mirrorRecoveryBusy) return false;
+  const generation = mirrorRecoveryGuard.capture();
+  const recoveringWatchedPhone = mirrorLinkLost && serial === watchedMirrorSerial;
+  const recoveryPreset = chooseRecoveryPreset({
+    automatic,
+    linkLost: recoveringWatchedPhone,
+    activePreset: recoveringWatchedPhone ? watchedMirrorPreset : "",
+    selectedPreset: savedMirrorPreset(serial)
+      || (serial === $("launch-serial").value ? $("launch-preset").value : "fullscreen"),
+  });
+  mirrorRecoveryBusy = true;
+  $("stop-btn").disabled = false;
+  if (mirrorRecoveryTimer) { clearTimeout(mirrorRecoveryTimer); mirrorRecoveryTimer = null; }
+  if (automatic) mirrorRecoveryAttempts += 1;
+  else mirrorRecoveryAttempts = 0;
+
+  const wireless = serial.includes(":") && !serial.startsWith("emulator-");
+  const tries = automatic ? 1 : 3;
+  let retryAgain = false;
+  try {
+    if (automatic && shouldPauseAutoRecovery(watchedMirrorPreset)) {
+      mirrorRecoveryAttempts = MAX_AUTO_RECOVERY_ATTEMPTS;
+      $("phone-action-status").textContent = "Auto-relaunch paused for recording. Reconnect manually to avoid starting an unattended new recording.";
+      return false;
+    }
+    for (let attempt = 1; attempt <= tries; attempt += 1) {
+      if (wireless) {
+        const split = serial.lastIndexOf(":");
+        const host = serial.slice(0, split);
+        const port = Number(serial.slice(split + 1));
+        try {
+          await api("/api/scrcpy/connect", {
+            method: "POST",
+            body: JSON.stringify({ host, port }),
+          });
+          if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+        } catch (e) {
+          if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+          if (attempt === tries && !automatic) {
+            $("phone-action-status").textContent = `ADB reconnect failed: ${e.message}`;
+          }
+        }
+      }
+
+      const devices = await detectDevices(false);
+      if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+      const device = devices.find((d) => d.serial === serial) || null;
+      cachedPhoneDevice = device;
+      lastDeviceCheckSerial = serial;
+      lastDeviceCheckAt = Date.now();
+      paintPhoneLink(serial, device);
+      if (device && device.state === "device") {
+        const current = await api("/api/scrcpy/status");
+        if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+        if (current.running && current.serial !== serial) {
+          throw new Error("Another phone mirror is running. Stop it before switching devices.");
+        }
+        if (current.running) {
+          await api("/api/scrcpy/stop", { method: "POST" });
+          if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+        }
+        const select = $("launch-serial");
+        if ([...select.options].some((opt) => opt.value === serial)) select.value = serial;
+        if (recoveryPreset
+            && [...$("launch-preset").options].some((opt) => opt.value === recoveryPreset)) {
+          $("launch-preset").value = recoveryPreset;
+          saveMirrorPreset(serial, recoveryPreset);
+        }
+        watchedMirrorSerial = serial;
+        mirrorLinkLost = false;
+        nativeMirrorRunning = false;
+        if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+        const started = await launchScrcpy(generation);
+        if (started) {
+          mirrorRecoveryAttempts = 0;
+          $("phone-action-status").textContent = "Phone reconnected; mirror relaunched.";
+          if (automatic) showToast("Phone reconnected — mirror relaunched");
+          return true;
+        }
+        break;
+      }
+      if (attempt < tries) {
+        await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+        if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+      }
+    }
+    if (automatic) {
+      if (mirrorRecoveryAttempts < MAX_AUTO_RECOVERY_ATTEMPTS) {
+        retryAgain = true;
+      } else {
+        $("phone-action-status").textContent = "Automatic retries paused. Reconnect the phone, then use Reconnect & relaunch.";
+      }
+    } else {
+      $("phone-action-status").textContent = "Phone is not ready yet. Check the cable/Wi-Fi and accept any ADB prompt.";
+    }
+    return false;
+  } catch (e) {
+    if (!mirrorRecoveryGuard.isCurrent(generation)) return false;
+    $("phone-action-status").textContent = `Reconnect failed: ${e.message} ${scrcpyErrorGuidance(e.message)}`;
+    if (automatic && mirrorRecoveryAttempts < MAX_AUTO_RECOVERY_ATTEMPTS) {
+      retryAgain = true;
+    }
+    return false;
+  } finally {
+    mirrorRecoveryBusy = false;
+    if (retryAgain && mirrorRecoveryGuard.isCurrent(generation)) {
+      setTimeout(() => scheduleMirrorRecovery(serial), 0);
     }
   }
-  await detectDevices(false);
-  // Pick the matching option in the launch dropdown
-  const select = $("launch-serial");
-  for (const opt of select.options) {
-    if (opt.value === serial) { select.value = serial; break; }
+}
+
+function scheduleMirrorRecovery(serial) {
+  if (!serial || mirrorRecoveryTimer || mirrorRecoveryBusy) return;
+  if (mirrorRecoveryAttempts >= MAX_AUTO_RECOVERY_ATTEMPTS) {
+    $("phone-action-status").textContent = "Automatic retries paused. Use Reconnect & relaunch when the phone is available.";
+    return;
   }
-  await launchScrcpy();
+  const delay = recoveryDelay(mirrorRecoveryAttempts);
+  $("stop-btn").disabled = false;
+  $("phone-action-status").textContent = `Phone link lost. Retrying automatically in ${Math.ceil(delay / 1000)}s…`;
+  mirrorRecoveryTimer = setTimeout(() => {
+    mirrorRecoveryTimer = null;
+    reconnectAndLaunch(serial, { automatic: true });
+  }, delay);
 }
 
 // ---------- Webcam QR scanner (consumes phonebridge-pair: payloads) ----------
@@ -839,7 +1160,7 @@ async function pair() {
     showToast("Paired with phone");
   } catch (e) {
     status.style.color = "";
-    status.textContent = `Pair failed: ${e.message}`;
+    status.textContent = `Pair failed: ${e.message} ${scrcpyErrorGuidance(e.message)}`;
   } finally {
     $("pair-btn").disabled = false;
   }
@@ -866,13 +1187,13 @@ async function connect() {
     await detectDevices(false);
   } catch (e) {
     status.style.color = "";
-    status.textContent = `Connect failed: ${e.message}`;
+    status.textContent = `Connect failed: ${e.message} ${scrcpyErrorGuidance(e.message)}`;
   } finally {
     $("conn-btn").disabled = false;
   }
 }
 
-async function launchScrcpy() {
+async function launchScrcpy(generation = mirrorRecoveryGuard.capture()) {
   const select = $("launch-serial");
   const serial = select.value;
   const preset = $("launch-preset").value;
@@ -880,7 +1201,7 @@ async function launchScrcpy() {
   errEl.textContent = "";
   if (!serial) {
     errEl.textContent = "Pick a device first.";
-    return;
+    return false;
   }
   // Pull the friendly name from the selected option's dataset (set when we
   // rendered the device list) so the recents file remembers "Pixel 8"
@@ -893,6 +1214,12 @@ async function launchScrcpy() {
       method: "POST",
       body: JSON.stringify({ serial, preset, name }),
     });
+    if (!mirrorRecoveryGuard.isCurrent(generation)) {
+      // Stop may have arrived while the launch request was being handled.
+      // Issue a second stop so the user's cancellation wins that race.
+      try { await api("/api/scrcpy/stop", { method: "POST" }); } catch { /* best effort */ }
+      return false;
+    }
     // Immediate feedback for the auto-tuner: show the chosen profile and
     // measured RTT so the user knows why the mirror started at this
     // quality, without waiting for the recents-row pill to refresh.
@@ -910,14 +1237,22 @@ async function launchScrcpy() {
     } else {
       showToast("Launching scrcpy…");
     }
+    watchedMirrorSerial = serial;
+    watchedMirrorPreset = preset;
+    saveMirrorPreset(serial, preset);
+    mirrorLinkLost = false;
+    mirrorRecoveryAttempts = 0;
     pollStatus();
     loadRecent();
+    return true;
   } catch (e) {
     if (e.status === 409) {
       errEl.textContent = "scrcpy is already running. Stop it first.";
     } else {
-      errEl.textContent = `Launch failed: ${e.message}`;
+      errEl.textContent = `Launch failed: ${e.message}\n${scrcpyErrorGuidance(e.message)}`;
     }
+    if (mirrorRecoveryGuard.isCurrent(generation)) pollStatus();
+    return false;
   } finally {
     $("launch-btn").disabled = false;
   }
@@ -1020,33 +1355,79 @@ async function pollQrStatus() {
 
 async function stopScrcpy() {
   $("stop-btn").disabled = true;
+  mirrorRecoveryGuard.invalidate();
+  if (mirrorRecoveryTimer) { clearTimeout(mirrorRecoveryTimer); mirrorRecoveryTimer = null; }
+  mirrorRecoveryAttempts = 0;
+  mirrorLinkLost = false;
+  watchedMirrorSerial = "";
+  watchedMirrorPreset = "";
+  nativeMirrorRunning = false;
   try {
-    await api("/api/scrcpy/stop", { method: "POST" });
-    showToast("Stopped scrcpy");
+    const result = await api("/api/scrcpy/stop", { method: "POST" });
+    const restore = result && result.rotation_restore;
+    if (restore && restore.restored) {
+      showToast("Stopped scrcpy · original phone rotation restored");
+      $("phone-action-status").textContent = "Mirror stopped; the phone's saved rotation and Auto-rotate setting were restored.";
+    } else if (restore && !restore.ok) {
+      showToast("Stopped scrcpy · rotation restore needs attention");
+      $("phone-action-status").textContent = `Mirror stopped, but rotation restore failed: ${restore.error || "unknown error"}. Reconnect the phone and use Restore rotation.`;
+    } else {
+      showToast("Stopped scrcpy");
+    }
     pollStatus();
   } catch (e) {
     showToast(`Stop failed: ${e.message}`);
+    pollStatus();
   }
 }
 
 async function pollStatus() {
   if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
+  const pollToken = mirrorRecoveryGuard.beginStatusPoll();
   let s;
   try {
     s = await api("/api/scrcpy/status");
   } catch {
-    statusTimer = setTimeout(pollStatus, 4000);
+    if (mirrorRecoveryGuard.isCurrentStatusPoll(pollToken)) {
+      statusTimer = setTimeout(pollStatus, 4000);
+    }
     return;
   }
+  if (!mirrorRecoveryGuard.isCurrentStatusPoll(pollToken)) return;
+  const hadMirror = nativeMirrorRunning;
+  nativeMirrorRunning = !!s.running;
   const pill = $("run-pill");
   if (s.running) {
+    watchedMirrorSerial = s.serial || watchedMirrorSerial;
+    watchedMirrorPreset = s.preset || watchedMirrorPreset || $("launch-preset").value;
     setPill(pill, `Running · ${s.serial}`, "ok");
     $("stop-btn").disabled = false;
     $("launch-btn").disabled = true;
+    const device = await refreshPhoneLink(watchedMirrorSerial);
+    if (!mirrorRecoveryGuard.isCurrentStatusPoll(pollToken)) return;
+    if (!device || device.state !== "device") {
+      mirrorLinkLost = true;
+      scheduleMirrorRecovery(watchedMirrorSerial);
+    } else if (!mirrorLinkLost) {
+      mirrorRecoveryAttempts = 0;
+    }
   } else {
     setPill(pill, "Stopped");
-    $("stop-btn").disabled = true;
+    $("stop-btn").disabled = !(mirrorLinkLost || mirrorRecoveryTimer || mirrorRecoveryBusy);
     $("launch-btn").disabled = false;
+    const serial = watchedMirrorSerial || $("launch-serial").value;
+    const device = await refreshPhoneLink(serial, hadMirror);
+    if (!mirrorRecoveryGuard.isCurrentStatusPoll(pollToken)) return;
+    if (hadMirror && (!device || device.state !== "device")) mirrorLinkLost = true;
+    if (mirrorLinkLost && watchedMirrorSerial) {
+      scheduleMirrorRecovery(watchedMirrorSerial);
+    } else if (hadMirror) {
+      // A live phone with a closed scrcpy window is treated as an intentional
+      // close, not a disconnect, so we do not unexpectedly reopen the window.
+      watchedMirrorSerial = "";
+      watchedMirrorPreset = "";
+      mirrorRecoveryAttempts = 0;
+    }
   }
   // Mirror status carries the sndcpy snapshot under `audio` — use it to
   // keep the dedicated audio pill in sync on every poll without an extra
@@ -1062,7 +1443,9 @@ async function pollStatus() {
   log.textContent = (s.log_tail || []).join("\n") || "scrcpy log will appear here…";
   log.scrollTop = log.scrollHeight;
   // Poll faster while running so the user sees fresh output / exits quickly.
-  statusTimer = setTimeout(pollStatus, s.running ? 1500 : 5000);
+  if (mirrorRecoveryGuard.isCurrentStatusPoll(pollToken)) {
+    statusTimer = setTimeout(pollStatus, s.running ? 1500 : 5000);
+  }
 }
 
 function escapeHtml(s) {
@@ -1155,19 +1538,11 @@ async function mvStart() {
     $("mv-error").textContent = "Pick a connected device first.";
     return;
   }
-  $("mv-start-btn").disabled = true;
-  try {
-    const r = await api("/api/scrcpy/viewer/start", {
-      method: "POST",
-      body: JSON.stringify({ serial, fps }),
-    });
-    mvPaintPill(true, r.session?.fps || fps);
-    showToast(`Browser viewer live at /mirror-view (${r.session?.fps || fps} fps)`);
-  } catch (e) {
-    $("mv-error").textContent = `Could not start: ${e.message}`;
-  } finally {
-    $("mv-start-btn").disabled = false;
-  }
+  // Open synchronously from the button click so popup blockers allow it.
+  // The viewer negotiates PNG/H.264 and starts its own session after auth;
+  // avoiding a second setup-page start prevents competing mode changes.
+  window.open(mvViewerUrl(serial, fps), "_blank", "noopener,noreferrer");
+  showToast("Phone control opened. The viewer will connect and start the stream.");
 }
 
 async function mvStop() {
@@ -1188,12 +1563,18 @@ async function mvStop() {
   }
 }
 
+function mvViewerUrl(serial, fps) {
+  const params = new URLSearchParams();
+  if (serial) params.set("serial", serial);
+  if (fps) params.set("fps", String(fps));
+  const query = params.toString();
+  return query ? `/mirror-view?${query}` : "/mirror-view";
+}
+
 function mvOpenViewer() {
   const serial = $("mv-serial-select").value;
-  const url = serial
-    ? `/mirror-view?serial=${encodeURIComponent(serial)}`
-    : "/mirror-view";
-  window.open(url, "_blank", "noopener");
+  const fps = parseInt($("mv-fps-select").value, 10) || 6;
+  window.open(mvViewerUrl(serial, fps), "_blank", "noopener,noreferrer");
 }
 
 function wireUI() {
@@ -1202,8 +1583,24 @@ function wireUI() {
   $("recent-refresh-btn").addEventListener("click", loadRecent);
   $("pair-btn").addEventListener("click", pair);
   $("conn-btn").addEventListener("click", connect);
-  $("launch-btn").addEventListener("click", launchScrcpy);
+  $("launch-btn").addEventListener("click", () => {
+    mirrorRecoveryGuard.invalidate();
+    if (mirrorRecoveryTimer) { clearTimeout(mirrorRecoveryTimer); mirrorRecoveryTimer = null; }
+    mirrorRecoveryAttempts = 0;
+    mirrorLinkLost = false;
+    watchedMirrorSerial = "";
+    watchedMirrorPreset = "";
+    launchScrcpy(mirrorRecoveryGuard.capture());
+  });
   $("stop-btn").addEventListener("click", stopScrcpy);
+  $("phone-reconnect-btn").addEventListener("click", () =>
+    reconnectAndLaunch(watchedMirrorSerial || $("launch-serial").value));
+  document.querySelectorAll("[data-phone-action]").forEach((btn) =>
+    btn.addEventListener("click", () => phoneDeviceAction(btn.dataset.phoneAction)));
+  $("phone-awake-btn").addEventListener("click", () => {
+    const serial = watchedMirrorSerial || $("launch-serial").value;
+    phoneDeviceAction(keepAwakeEnabled(serial) ? "awake_off" : "awake_on");
+  });
   $("qr-start-btn").addEventListener("click", startQrPair);
   $("qr-cancel-btn").addEventListener("click", cancelQrPair);
   $("scan-start-btn").addEventListener("click", startScan);
@@ -1227,7 +1624,29 @@ function wireUI() {
   if (ls) {
     const obs = new MutationObserver(mvSyncSerials);
     obs.observe(ls, { childList: true });
+    ls.addEventListener("change", () => {
+      applyPhonePreferences(ls.value);
+      lastDeviceCheckSerial = "";
+      if (!nativeMirrorRunning
+          && (mirrorLinkLost || mirrorRecoveryBusy || $("launch-btn").disabled)
+          && ls.value !== watchedMirrorSerial) {
+        mirrorRecoveryGuard.invalidate();
+        if (mirrorRecoveryTimer) { clearTimeout(mirrorRecoveryTimer); mirrorRecoveryTimer = null; }
+        mirrorRecoveryAttempts = 0;
+        mirrorLinkLost = false;
+        watchedMirrorSerial = ls.value;
+        $("stop-btn").disabled = true;
+        $("phone-action-status").textContent = "Phone selection changed; automatic recovery for the previous device was cancelled.";
+      }
+      refreshPhoneLink(nativeMirrorRunning ? watchedMirrorSerial : ls.value, true);
+      mvSyncSerials();
+      pollStatus();
+    });
   }
+  $("launch-preset").addEventListener("change", (event) => {
+    saveMirrorPreset($("launch-serial").value, event.target.value);
+    applyPhonePreferences($("launch-serial").value);
+  });
   document.querySelectorAll("[data-copy]").forEach((btn) =>
     btn.addEventListener("click", () => {
       const target = document.getElementById(btn.dataset.copy);
@@ -1276,9 +1695,7 @@ function fmtDuration(sec) {
 }
 
 function recordingUrl(name) {
-  const t = getToken();
-  const q = t ? `?token=${encodeURIComponent(t)}` : "";
-  return `/api/scrcpy/recordings/file/${encodeURIComponent(name)}${q}`;
+  return `/api/scrcpy/recordings/file/${encodeURIComponent(name)}`;
 }
 
 function renderRecordings(items) {
@@ -1314,13 +1731,20 @@ function renderRecordings(items) {
       <div data-role="player" style="display:none;margin-top:10px"></div>
     `;
     const player = row.querySelector('[data-role="player"]');
-    const togglePlay = () => {
+    const togglePlay = async () => {
       if (player.style.display === "none") {
-        player.innerHTML = `
-          <video controls autoplay preload="metadata"
-                 style="width:100%;max-height:480px;border-radius:8px;background:#000"
-                 src="${recordingUrl(r.name)}"></video>
-        `;
+        const video = document.createElement("video");
+        video.controls = true;
+        video.autoplay = true;
+        video.preload = "metadata";
+        video.style.cssText = "width:100%;max-height:480px;border-radius:8px;background:#000";
+        try {
+          video.src = await ticketedUrl(recordingUrl(r.name));
+        } catch {
+          showToast("Could not authorize recording playback", "error");
+          return;
+        }
+        player.replaceChildren(video);
         player.style.display = "block";
       } else {
         // Tear the <video> down so it stops fetching/decoding when collapsed.

@@ -29,6 +29,7 @@ LOG_RING = 200
 _lock = threading.Lock()
 _proc: Optional[subprocess.Popen] = None
 _proc_serial: Optional[str] = None
+_proc_preset: Optional[str] = None
 _proc_started: float = 0.0
 _log_ring: Deque[str] = deque(maxlen=LOG_RING)
 _reader_thread: Optional[threading.Thread] = None
@@ -310,11 +311,18 @@ def pick_quality(rtt_ms: Optional[float], loss_pct: Optional[float]) -> str:
 
 # Presets that auto-tune accepts. Other presets (record, low-bitrate) bypass
 # tuning entirely so the user gets exactly what they asked for.
-_TUNABLE_PRESETS = {"default"}
+_TUNABLE_PRESETS = {"default", "fullscreen"}
 
 
 PRESETS: Dict[str, List[str]] = {
-    # Sensible defaults: forward audio + clipboard, fit to window.
+    # Full Android display on the laptop; forward audio + clipboard.
+    "fullscreen": [
+        "--fullscreen",
+        "--audio-codec=opus",
+        "--max-size=1280",
+        "--video-bit-rate=8M",
+    ],
+    # Sensible windowed defaults: forward audio + clipboard, fit to window.
     "default": [
         "--audio-codec=opus",
         "--max-size=1280",
@@ -373,6 +381,7 @@ def status() -> Dict[str, Any]:
             "running": running,
             "pid": _proc.pid if running and _proc else None,
             "serial": _proc_serial if running else None,
+            "preset": _proc_preset if running else None,
             "started_at": _proc_started if running else None,
             "log_tail": list(_log_ring)[-40:],
         }
@@ -391,7 +400,7 @@ def launch(serial: str, preset: str = "default",
     devices file so the UI can show a human label like "Pixel 8" instead of
     the raw `192.168.1.42:5555`.
     """
-    global _proc, _proc_serial, _proc_started, _reader_thread
+    global _proc, _proc_serial, _proc_preset, _proc_started, _reader_thread
     if is_running():
         raise RuntimeError("scrcpy is already running; stop it first.")
     if preset not in PRESETS:
@@ -484,6 +493,7 @@ def launch(serial: str, preset: str = "default",
                 "scrcpy is not installed. Install with: sudo apt install scrcpy"
             ) from e
         _proc_serial = serial
+        _proc_preset = preset
         _proc_started = time.time()
         _reader_thread = threading.Thread(
             target=_drain_output, args=(_proc,), daemon=True

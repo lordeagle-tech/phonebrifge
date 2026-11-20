@@ -24,7 +24,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from .. import audit, security
-from ..auth import verify_token
+from ..auth import consume_connection_ticket
 
 router = APIRouter()
 
@@ -98,9 +98,10 @@ def _get_primary_monitor() -> dict:
 
 
 @router.websocket("/ws/input")
-async def input_ws(websocket: WebSocket, token: str = Query(None)):
+async def input_ws(websocket: WebSocket, ticket: str = Query(None)):
     ip = security.ws_client_ip(websocket)
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("control", "input_ws", ip=ip, outcome="auth_fail")
         await websocket.close(code=4001)
         return
@@ -122,7 +123,7 @@ async def input_ws(websocket: WebSocket, token: str = Query(None)):
     keyboard = KeyboardController()
 
     async def watchdog():
-        await security.ws_session_watchdog(websocket, token, "control", "input_ws", ip)
+        await security.ws_session_watchdog(websocket, session_token, "control", "input_ws", ip)
 
     watch_task = asyncio.create_task(watchdog())
 

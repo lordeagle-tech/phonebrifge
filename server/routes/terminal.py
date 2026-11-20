@@ -14,7 +14,7 @@ import termios
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from .. import audit, security
-from ..auth import verify_token
+from ..auth import consume_connection_ticket
 
 router = APIRouter()
 
@@ -49,12 +49,13 @@ def _set_pty_size(fd: int, rows: int, cols: int) -> None:
 @router.websocket("/ws/terminal")
 async def terminal_ws(
     websocket: WebSocket,
-    token: str = Query(None),
+    ticket: str = Query(None),
     mode: str = Query("laptop"),
     serial: str | None = Query(None),
 ):
     ip = security.ws_client_ip(websocket)
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("control", "terminal_ws", ip=ip, outcome="auth_fail")
         await websocket.close(code=4001)
         return
@@ -125,7 +126,7 @@ async def terminal_ws(
         await asyncio.gather(
             read_from_pty(),
             write_to_pty(),
-            security.ws_session_watchdog(websocket, token, "control", "terminal_ws", ip),
+            security.ws_session_watchdog(websocket, session_token, "control", "terminal_ws", ip),
         )
     finally:
         audit.log("control", "terminal_ws", ip=ip, outcome="disconnected")

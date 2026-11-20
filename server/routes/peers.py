@@ -2,8 +2,8 @@
 HTTP + WebSocket routes for peer-laptop linking.
 
 Three surfaces:
-  * ``POST /api/peers/pair`` — open endpoint (rate-limited via the
-    default bucket). A peer presents the 6-digit pair code shown on
+  * ``POST /api/peers/pair`` — open endpoint (strictly rate-limited via
+    the pairing bucket). A peer presents the 8-digit pair code shown on
     the main laptop's banner; on success the registry mints a record
     and returns ``{id, secret}`` once.
   * ``GET /api/peers`` and ``GET /api/peers/pair-code`` — PIN-auth.
@@ -54,7 +54,7 @@ async def list_peers(_token: str = Depends(require_auth)) -> Dict[str, Any]:
 
 @router.get("/peers/pair-code")
 async def pair_code(_token: str = Depends(require_auth)) -> Dict[str, Any]:
-    """Current 6-digit code + seconds until it rotates. PIN-auth so
+    """Current 8-digit code + seconds until it rotates. PIN-auth so
     only an already-trusted browser session can read it; the code
     itself is what authorises the next peer to join."""
     code, remaining = peer_pair_code.get()
@@ -78,7 +78,7 @@ async def forget_peer(peer_id: str, request: Request,
 
 @router.post("/peers/pair")
 async def pair(request: Request) -> Dict[str, Any]:
-    """Pairing endpoint. NOT PIN-authed — the 6-digit code is the
+    """Pairing endpoint. NOT PIN-authed — the 8-digit code is the
     auth. Body: ``{code, hostname, os}``. The peer's IP is captured
     from the request itself (more reliable than asking the peer)."""
     try:
@@ -96,14 +96,14 @@ async def pair(request: Request) -> Dict[str, Any]:
         peer_port = 0
     ip = _client_ip(request)
 
-    if not peer_pair_code.verify(code):
-        audit.log("peer", "pair", ip=ip, outcome="bad_code")
-        raise HTTPException(status_code=401,
-                            detail="Pairing code is wrong or expired")
     if not HOSTNAME_RE.match(hostname):
         raise HTTPException(status_code=400, detail="Invalid hostname")
     if len(os_name) > 64:
         raise HTTPException(status_code=400, detail="Invalid os")
+    if not peer_pair_code.consume(code):
+        audit.log("peer", "pair", ip=ip, outcome="bad_code")
+        raise HTTPException(status_code=401,
+                            detail="Pairing code is wrong, expired, or already used")
 
     rec = peer_registry.add_peer(hostname=hostname, os_name=os_name,
                                  local_ip=ip, peer_port=peer_port)
@@ -152,6 +152,11 @@ async def peer_ws(ws: WebSocket) -> None:
         if not PEER_ID_RE.match(peer_id) or not peer_registry.verify(peer_id, secret):
             await ws.close(code=4001, reason="bad credentials")
             return
+
+        if "peer_cert" in hello:
+            if not peer_registry.update_certificate(peer_id, hello["peer_cert"]):
+                await ws.close(code=4000, reason="bad peer certificate")
+                return
 
         client_ip = ws.client.host if ws.client else None
         # Peer agents that exposed an HTTP server (for screen + input

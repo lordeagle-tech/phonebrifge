@@ -1,4 +1,4 @@
-import { getToken } from "./auth.js";
+import { getToken, openTicketedWebSocket, ticketedUrl } from "./auth.js";
 import { showToast } from "./utils.js";
 import { targetFor, wsPath } from "./target.js";
 
@@ -25,6 +25,7 @@ const MAX_SCALE = 5;
 
 /* ── Click-through state ── */
 let inputWs = null;
+let inputWsPending = false;
 let tapStartPos = null;
 let tapStartTime = 0;
 let tapMoved = false;
@@ -45,10 +46,18 @@ function flushPending() {
   pendingInput = null;
 }
 
-function connectInputWs() {
+async function connectInputWs() {
   if (inputWs && (inputWs.readyState === WebSocket.OPEN || inputWs.readyState === WebSocket.CONNECTING)) return;
-  const token = getToken();
-  inputWs = new WebSocket(`${getWsBase()}${wsPath("/ws/input", "screen")}?token=${encodeURIComponent(token)}`);
+  if (inputWsPending) return;
+  inputWsPending = true;
+  try {
+    inputWs = await openTicketedWebSocket(`${getWsBase()}${wsPath("/ws/input", "screen")}`);
+  } catch {
+    inputWs = null;
+    inputWsPending = false;
+    return;
+  }
+  inputWsPending = false;
   inputWs.onopen = flushPending;
   inputWs.onclose = () => { inputWs = null; pendingInput = null; };
   inputWs.onerror = () => {};
@@ -318,7 +327,7 @@ function initPinchZoom() {
 /* ── Stream (WS for main, MJPEG for peers) ── */
 //
 // The main bridge serves binary JPEG frames over /ws/screen, but
-// peer agents only expose /screen.mjpeg over plain HTTP (no WS).
+// peer agents expose /screen.mjpeg over pinned HTTPS (no WS).
 // When the user retargets the screen tab to a peer we therefore
 // fall back to a simple ``<img src=mjpeg-url>`` — the browser
 // renders multipart/x-mixed-replace natively, so we don't have to
@@ -328,13 +337,11 @@ function initPinchZoom() {
 function _peerMjpegUrl() {
   const t = targetFor("screen");
   if (t.kind !== "peer") return null;
-  const token = getToken();
   return `/api/peers/${t.id}/screen.mjpeg`
-       + `?token=${encodeURIComponent(token)}`
-       + `&fps=${currentFps}&quality=${currentQuality}`;
+       + `?fps=${currentFps}&quality=${currentQuality}`;
 }
 
-function connect() {
+async function connect() {
   if (ws) { ws.close(); ws = null; }
   if (!imgEl) return;
   setStatus("Connecting…");
@@ -351,14 +358,28 @@ function connect() {
     revoke();
     imgEl.onerror = () => { setStatus("Error", "disconnected"); setOverlay("empty"); };
     imgEl.onload = () => { setStatus("Live (peer)", "connected"); setOverlay("live"); };
-    imgEl.src = mjpeg;
+    try {
+      const url = await ticketedUrl(mjpeg);
+      if (!active || targetFor("screen").kind !== "peer") return;
+      imgEl.src = url;
+    } catch {
+      setStatus("Authorization failed", "disconnected");
+      setOverlay("empty");
+    }
     setStatus("Live (peer)", "connected");
     return;
   }
 
   mjpegMode = false;
-  const token = getToken();
-  ws = new WebSocket(`${getWsBase()}/ws/screen?token=${encodeURIComponent(token)}&fps=${currentFps}&quality=${currentQuality}`);
+  try {
+    ws = await openTicketedWebSocket(`${getWsBase()}/ws/screen?fps=${currentFps}&quality=${currentQuality}`);
+  } catch {
+    setStatus("Authorization failed", "disconnected");
+    active = false;
+    setOverlay("empty");
+    return;
+  }
+  if (!active) { ws.close(); ws = null; return; }
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
@@ -400,13 +421,25 @@ function disconnect() {
   setOverlay("empty");
 }
 
-function sendSettings() {
+async function sendSettings() {
   if (mjpegMode) {
     // The MJPEG URL embeds fps + quality in its query string, so to
     // pick up a slider change we just rebuild the URL — the browser
     // will tear down the old multipart connection and start a new
     // one transparently.
-    if (active && imgEl) imgEl.src = _peerMjpegUrl() || "";
+    if (active && imgEl) {
+      const target = targetFor("screen");
+      const rawUrl = _peerMjpegUrl();
+      if (!rawUrl) return;
+      try {
+        const url = await ticketedUrl(rawUrl);
+        const latest = targetFor("screen");
+        if (active && mjpegMode && latest.kind === "peer"
+            && latest.id === target.id) imgEl.src = url;
+      } catch {
+        setStatus("Authorization failed", "disconnected");
+      }
+    }
     return;
   }
   if (ws && ws.readyState === WebSocket.OPEN) {

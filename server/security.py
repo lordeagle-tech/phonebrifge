@@ -85,6 +85,8 @@ _buckets: Dict[Tuple[str, str], Deque[float]] = defaultdict(deque)
 # (window_seconds, max_requests) per bucket
 LIMITS: Dict[str, Tuple[int, int]] = {
     "auth": (60, 10),
+    "ticket": (60, 120),
+    "pair": (60, 3),
     "files": (60, 60),
     "clipboard": (60, 60),
     "default": (60, 120),
@@ -135,7 +137,7 @@ async def ws_session_watchdog(websocket, token: str, category: str,
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
             return
-        if not auth.verify_token(token):
+        if not auth.is_token_valid(token):
             audit.log(category, "session_expired", ip=ip, outcome="closed",
                       detail={"action": action})
             try:

@@ -1,4 +1,4 @@
-import { getToken } from "./auth.js";
+import { openTicketedWebSocket } from "./auth.js";
 import { wsPath } from "./target.js";
 
 let term = null;
@@ -17,16 +17,20 @@ function setStatus(connected) {
   el.className = connected ? "connected" : "disconnected";
 }
 
-function connect() {
+async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     ws.close();
   }
 
-  const token = getToken();
-  ws = new WebSocket(
+  const url =
     `${getWsBase()}${wsPath("/ws/terminal", "terminal")}` +
-    `?token=${encodeURIComponent(token)}&mode=${encodeURIComponent(mode)}`
-  );
+    `?mode=${encodeURIComponent(mode)}`;
+  try {
+    ws = await openTicketedWebSocket(url);
+  } catch {
+    setStatus(false);
+    return;
+  }
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {

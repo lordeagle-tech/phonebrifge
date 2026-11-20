@@ -1,4 +1,4 @@
-import { getToken } from "./auth.js";
+import { getToken, openTicketedWebSocket } from "./auth.js";
 import { showToast } from "./utils.js";
 import { wsPath } from "./target.js";
 
@@ -15,10 +15,14 @@ function send(msg) {
   }
 }
 
-function connectWs() {
+async function connectWs() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  const token = getToken();
-  ws = new WebSocket(`${getWsBase()}${wsPath("/ws/input", "control")}?token=${encodeURIComponent(token)}`);
+  try {
+    ws = await openTicketedWebSocket(`${getWsBase()}${wsPath("/ws/input", "control")}`);
+  } catch {
+    ws = null;
+    return;
+  }
   ws.onopen = () => {};
   ws.onclose = () => {};
   ws.onerror = () => {};

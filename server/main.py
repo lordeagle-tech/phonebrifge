@@ -3,26 +3,38 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import audio_capture, audit, auth, mirror_recording, notifications, peer_pair_code, phone_capture, photos, scrcpy_watcher, security, sms, webrtc_config
 from .deps import require_auth
+from .request_limits import RequestBodyLimitMiddleware
+from .security_origin import websocket_origin_is_allowed
 from .routes import clipboard, files, input as input_route, notifications as notifications_route, peer_proxy as peer_proxy_route, peers as peers_route, photos as photos_route, screen, scrcpy, signaling, sms as sms_route, stats, terminal
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 app = FastAPI(title="Laptop-Phone Bridge", docs_url=None, redoc_url=None)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+class WebSocketOriginMiddleware:
+    """Reject cross-origin browser WebSockets; native clients may omit Origin."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            if not websocket_origin_is_allowed(scope):
+                await send({"type": "websocket.close", "code": 1008})
+                return
+        await self.app(scope, receive, send)
+
+
+# The UI is served by this same application, so cross-origin API access is
+# unnecessary. WebSocket Origin validation is kept explicit as defense in depth.
+app.add_middleware(WebSocketOriginMiddleware)
 
 
 def _client_ip(request: Request) -> str:
@@ -31,6 +43,10 @@ def _client_ip(request: Request) -> str:
 
 def _bucket_for(path: str) -> Optional[str]:
     """Map a path to a rate-limit bucket. None = no limiting."""
+    if path == "/api/peers/pair":
+        return "pair"
+    if path == "/api/auth/connection-ticket":
+        return "ticket"
     if path.startswith("/api/auth/"):
         return "auth"
     if path.startswith("/api/files"):
@@ -95,6 +111,17 @@ class AuditMiddleware(BaseHTTPMiddleware):
         return response
 
 
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    path="/api/files/upload",
+    max_bytes=files.MAX_UPLOAD_BYTES + 1024 * 1024,
+    include_peer_proxy=True,
+)
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    path="/api/peers/pair",
+    max_bytes=16 * 1024,
+)
 app.add_middleware(AuditMiddleware)
 app.add_middleware(RateLimitMiddleware)
 
@@ -103,7 +130,7 @@ def _get_token(request: Request) -> Optional[str]:
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return auth_header[7:]
-    return request.query_params.get("token")
+    return None
 
 
 @app.post("/api/auth/login")
@@ -164,6 +191,23 @@ async def logout(request: Request):
         auth.invalidate_session(token)
         audit.log("auth", "logout", ip=_client_ip(request), outcome="ok")
     return {"ok": True}
+
+
+@app.post("/api/auth/connection-ticket")
+async def connection_ticket(request: Request):
+    """Mint a one-use URL credential for a single WebSocket/media path."""
+    token = _get_token(request)
+    if not auth.verify_token(token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    path = body.get("path") if isinstance(body, dict) else None
+    ticket = auth.create_connection_ticket(token, path)
+    if not ticket:
+        raise HTTPException(status_code=400, detail="Invalid connection path")
+    return {"ticket": ticket, "expires_in_s": int(auth.CONNECTION_TICKET_TTL)}
 
 
 @app.get("/api/auth/check")

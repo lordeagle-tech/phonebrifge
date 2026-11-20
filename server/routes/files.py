@@ -17,6 +17,7 @@ router = APIRouter()
 
 HOME = Path.home().resolve()
 UPLOAD_CHUNK = 65536  # 64 KB chunks for streaming uploads
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MiB per file
 
 
 def _safe_path(path: Optional[str]) -> Path:
@@ -31,6 +32,25 @@ def _safe_path(path: Optional[str]) -> Path:
     return resolved
 
 
+def _safe_upload_destination(target_dir: Path, filename: Optional[str]) -> Path:
+    """Return a new, confined upload destination; never accept path components."""
+    if (not filename or not filename.strip(" .") or filename in (".", "..")
+            or "\x00" in filename
+            or "/" in filename or "\\" in filename or ":" in filename):
+        raise HTTPException(status_code=400, detail="Invalid upload filename")
+    base = target_dir.resolve(strict=True)
+    try:
+        base.relative_to(HOME)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied: path outside home directory")
+    if not base.is_dir():
+        raise HTTPException(status_code=400, detail="Target path is not a directory")
+    dest = base / filename
+    if dest.exists() or dest.is_symlink():
+        raise HTTPException(status_code=409, detail="A file with that name already exists")
+    return dest
+
+
 def _fmt_size(size: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:
@@ -43,10 +63,21 @@ class _Cancelled(Exception):
     pass
 
 
+def _safe_archive_component(name: str) -> bool:
+    """Reject components that can become traversal/absolute paths cross-platform."""
+    if (not name or not name.strip(" .") or name in (".", "..")
+            or "/" in name or "\\" in name or name.startswith(("/", "\\"))
+            or ":" in name):
+        return False
+    return True
+
+
 def _add_path_to_zip(zf: zipfile.ZipFile, src: Path, arc_root: str, cancel: threading.Event) -> None:
     """Add a file or directory tree to the zip, rooted at arc_root inside the archive."""
     if cancel.is_set():
         raise _Cancelled()
+    if src.is_symlink():
+        return
     if src.is_file():
         try:
             zf.write(str(src), arcname=arc_root)
@@ -63,6 +94,11 @@ def _add_path_to_zip(zf: zipfile.ZipFile, src: Path, arc_root: str, cancel: thre
             if cancel.is_set():
                 raise _Cancelled()
             root_path = Path(root)
+            # os.walk does not descend through symlinked directories by default,
+            # but remove them explicitly so they are not emitted as entries.
+            dirs[:] = [d for d in dirs
+                       if _safe_archive_component(d)
+                       and not (root_path / d).is_symlink()]
             rel = root_path.relative_to(src)
             for d in dirs:
                 arc = f"{arc_root}/{(rel / d).as_posix()}/"
@@ -73,7 +109,15 @@ def _add_path_to_zip(zf: zipfile.ZipFile, src: Path, arc_root: str, cancel: thre
             for fname in files:
                 if cancel.is_set():
                     raise _Cancelled()
+                if not _safe_archive_component(fname):
+                    continue
                 fp = root_path / fname
+                if fp.is_symlink():
+                    continue
+                try:
+                    fp.resolve(strict=True).relative_to(HOME)
+                except (OSError, ValueError):
+                    continue
                 arc = f"{arc_root}/{(rel / fname).as_posix()}"
                 try:
                     zf.write(str(fp), arcname=arc)
@@ -90,6 +134,8 @@ def _build_zip_sync(items: List[Path], tmp_path: Path, cancel: threading.Event) 
             if cancel.is_set():
                 raise _Cancelled()
             base = item.name or "root"
+            if not _safe_archive_component(base):
+                continue
             count = seen.get(base, 0)
             arc_root = base if count == 0 else f"{base} ({count})"
             seen[base] = count + 1
@@ -261,16 +307,34 @@ async def upload_file(
     target_dir = _safe_path(path)
     if not target_dir.is_dir():
         raise HTTPException(status_code=400, detail="Target path is not a directory")
-
-    dest = target_dir / file.filename
-    with open(dest, "wb") as out:
-        while True:
-            chunk = await file.read(UPLOAD_CHUNK)
-            if not chunk:
-                break
-            out.write(chunk)
-
-    return {"ok": True, "path": str(dest), "name": file.filename}
+    dest = _safe_upload_destination(target_dir, file.filename)
+    fd, tmp_name = tempfile.mkstemp(prefix=".phone-bridge-upload-", dir=str(target_dir))
+    try:
+        total = 0
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = await file.read(UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Upload exceeds the 100 MiB limit")
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        try:
+            # A same-directory hard link publishes the completed file atomically
+            # and fails rather than overwriting a name created during the upload.
+            os.link(tmp_name, dest, follow_symlinks=False)
+        except FileExistsError:
+            raise HTTPException(status_code=409, detail="A file with that name already exists")
+        return {"ok": True, "path": str(dest), "name": file.filename}
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        await file.close()
 
 
 @router.delete("/files")

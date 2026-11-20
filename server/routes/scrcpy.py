@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 from .. import (audio_capture, audit, mirror_recording, phone_capture,
                  phone_input, ring, scrcpy_state, scrcpy_watcher, security,
                  sndcpy_state)
-from ..auth import verify_token
+from ..auth import consume_connection_ticket
 from ..deps import require_auth
 
 router = APIRouter()
@@ -444,7 +444,11 @@ async def pair_qr_cancel(request: Request, _token: str = Depends(require_auth)) 
 
 @router.post("/scrcpy/stop")
 async def stop(request: Request, _token: str = Depends(require_auth)) -> Dict[str, Any]:
+    before = scrcpy_state.status()
     st = scrcpy_state.stop()
+    if before.get("running") and before.get("serial"):
+        restore = await phone_input.device_action(before["serial"], "rotate_restore")
+        st["rotation_restore"] = restore
     audit.log("scrcpy", "stop", ip=_client_ip(request), outcome="ok")
     return st
 
@@ -452,6 +456,30 @@ async def stop(request: Request, _token: str = Depends(require_auth)) -> Dict[st
 @router.get("/scrcpy/status")
 async def status(_token: str = Depends(require_auth)) -> Dict[str, Any]:
     return scrcpy_state.status()
+
+
+@router.post("/scrcpy/device-action")
+async def device_action(request: Request,
+                        _token: str = Depends(require_auth)) -> Dict[str, Any]:
+    """Send a fixed phone-control action to the selected ADB device."""
+    body = await request.json()
+    serial = str(body.get("serial", "")).strip()
+    action = str(body.get("action", "")).strip()
+    if not SERIAL_RE.match(serial):
+        raise HTTPException(status_code=400, detail="Invalid serial")
+    if action not in {
+        "home", "back", "recents", "rotate", "rotate_restore",
+        "awake_on", "awake_off",
+    }:
+        raise HTTPException(status_code=400, detail="Unsupported phone action")
+    result = await phone_input.device_action(serial, action)
+    audit.log("control", "phone_action", ip=_client_ip(request),
+              outcome="ok" if result.get("ok") else "fail",
+              detail={"serial": serial, "action": action})
+    if not result.get("ok"):
+        raise HTTPException(status_code=502,
+                            detail=str(result.get("error") or "Phone action failed")[:300])
+    return result
 
 
 @router.get("/scrcpy/recent")
@@ -698,17 +726,18 @@ async def viewer_bitrate(request: Request,
 async def mirror_ws(websocket: WebSocket) -> None:
     """Stream PNG frames for one device's capture session.
 
-    Query params: `serial` (required), `token` (PIN session token).
+    Query params: `serial` (required), `ticket` (one-use connection ticket).
     Each binary message is a single PNG frame; an empty payload is the
     "stream ended" sentinel so the browser can close cleanly.
     """
     serial = (websocket.query_params.get("serial") or "").strip()
-    token = websocket.query_params.get("token")
+    ticket = websocket.query_params.get("ticket")
     ip = security.ws_client_ip(websocket)
     if not SERIAL_RE.match(serial):
         await websocket.close(code=4400)
         return
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("scrcpy", "mirror_ws", ip=ip, outcome="auth_fail",
                   detail={"serial": serial})
         await websocket.close(code=4001)
@@ -883,7 +912,7 @@ async def mirror_ws(websocket: WebSocket) -> None:
         await asyncio.gather(
             send_frames(),
             recv_control(),
-            security.ws_session_watchdog(websocket, token, "scrcpy",
+            security.ws_session_watchdog(websocket, session_token, "scrcpy",
                                          "mirror_ws", ip),
             return_exceptions=True,
         )
@@ -1108,18 +1137,19 @@ async def recordings_delete(name: str, request: Request,
 async def mirror_audio_ws(websocket: WebSocket) -> None:
     """Stream raw 16-bit LE PCM audio chunks for one device.
 
-    Query params: `serial` (required), `token` (PIN session).
+    Query params: `serial` (required), `ticket` (one-use connection ticket).
     First message is a JSON `hello` with sample rate / channels / bit
     depth. Subsequent binary messages are PCM byte chunks. An empty
     binary payload OR a JSON `ended` message means the capture stopped.
     """
     serial = (websocket.query_params.get("serial") or "").strip()
-    token = websocket.query_params.get("token")
+    ticket = websocket.query_params.get("ticket")
     ip = security.ws_client_ip(websocket)
     if not SERIAL_RE.match(serial):
         await websocket.close(code=4400)
         return
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("scrcpy", "mirror_audio_ws", ip=ip, outcome="auth_fail",
                   detail={"serial": serial})
         await websocket.close(code=4001)
@@ -1197,7 +1227,7 @@ async def mirror_audio_ws(websocket: WebSocket) -> None:
         await asyncio.gather(
             send_chunks(),
             recv_control(),
-            security.ws_session_watchdog(websocket, token, "scrcpy",
+            security.ws_session_watchdog(websocket, session_token, "scrcpy",
                                          "mirror_audio_ws", ip),
             return_exceptions=True,
         )

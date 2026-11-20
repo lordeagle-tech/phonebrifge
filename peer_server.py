@@ -1,14 +1,10 @@
 """
-Local HTTP server that runs on a *peer* laptop.
+Local HTTPS/WSS server that runs on a *peer* laptop.
 
 The main bridge proxies remote-control traffic to this server using
-the per-peer secret it was given at pairing time. Plain HTTP on the
-LAN is acceptable because:
-  * The peer secret is the real auth (constant-time compared).
-  * Bind defaults to ``0.0.0.0`` but the routes refuse without a
-    valid secret, so an unauthenticated LAN scan sees only 401.
-  * The whole feature is LAN-scoped (the README warns against
-    pairing across the public ngrok tunnel).
+the per-peer secret it was given at pairing time. The server requires
+HTTPS/WSS; its certificate is announced over the main bridge's
+certificate-verified heartbeat and pinned by the main proxy.
 
 This module only runs in the peer agent process — never on the main
 bridge. It re-uses ``server.routes.screen._capture_frame`` and the
@@ -148,20 +144,20 @@ def build_app(secret: str) -> FastAPI:
 
     @app.get("/screen/frame")
     async def screen_frame(
-        secret: Optional[str] = Query(None),
+        request: Request,
         quality: int = Query(DEFAULT_QUALITY, ge=MIN_QUALITY, le=MAX_QUALITY),
     ):
-        _check(secret)
+        _check(request.headers.get("x-peer-secret"))
         data = await asyncio.to_thread(_capture_frame, quality, 1.0)
         return Response(content=data, media_type="image/jpeg")
 
     @app.get("/screen.mjpeg")
     async def screen_mjpeg(
-        secret: Optional[str] = Query(None),
+        request: Request,
         fps: int = Query(DEFAULT_FPS, ge=1, le=MAX_FPS),
-        quality: int = Query(DEFAULT_QUALITY, ge=MIN_QUALITY, le=MAX_QUALITY),
+        quality: int = Query(DEFAULT_QUALITY, ge=20, le=MAX_QUALITY),
     ):
-        _check(secret)
+        _check(request.headers.get("x-peer-secret"))
         interval = 1.0 / fps
 
         async def gen():
@@ -184,9 +180,10 @@ def build_app(secret: str) -> FastAPI:
         )
 
     @app.websocket("/input")
-    async def input_ws(ws: WebSocket, secret: Optional[str] = Query(None)):
+    async def input_ws(ws: WebSocket):
         # Can't raise HTTPException from a WS handler; do the manual
         # check + close on bad secret.
+        secret = ws.headers.get("x-peer-secret")
         if not secret or not _secrets.compare_digest(_PEER_SECRET, secret):
             await ws.close(code=4001)
             return
@@ -273,9 +270,10 @@ def build_app(secret: str) -> FastAPI:
     # themselves don't need to know which kind of bridge they're
     # mounted on.
     # ------------------------------------------------------------------
-    async def _peer_secret_dep(secret: Optional[str] = Query(None)) -> str:  # noqa: ARG001
+    async def _peer_secret_dep(request: Request) -> str:
         # Imported lazily so a peer-only deployment doesn't have to
         # import every main-bridge dependency at import time.
+        secret = request.headers.get("x-peer-secret")
         if not secret or not _secrets.compare_digest(_PEER_SECRET, secret):
             raise HTTPException(status_code=401,
                                 detail="Bad peer secret")
@@ -291,6 +289,7 @@ def build_app(secret: str) -> FastAPI:
         from server.routes import clipboard as _clipboard_route
         from server.routes import files as _files_route
         from server.routes import stats as _stats_route
+        from server.request_limits import RequestBodyLimitMiddleware
     except ImportError:
         # Peers installed without the main server package can still
         # serve screen+input — file/stats/clipboard targeting just
@@ -302,18 +301,19 @@ def build_app(secret: str) -> FastAPI:
         app.include_router(_stats_route.router, prefix="/api")
         app.include_router(_clipboard_route.router, prefix="/api")
         mounted.extend(["files", "stats", "clipboard"])
+        app.add_middleware(
+            RequestBodyLimitMiddleware,
+            path="/api/files/upload",
+            max_bytes=_files_route.MAX_UPLOAD_BYTES + 1024 * 1024,
+        )
 
     global _CAPABILITIES
     _CAPABILITIES = mounted
 
     @app.websocket("/ws/terminal")
-    async def terminal_ws(ws: WebSocket,
-                          secret: Optional[str] = Query(None),
-                          token: Optional[str] = Query(None)):
-        # The main bridge proxy strips ?token= and adds ?secret= when
-        # forwarding; we accept either name for direct CLI testing.
-        s = secret or token
-        if not s or not _secrets.compare_digest(_PEER_SECRET, s):
+    async def terminal_ws(ws: WebSocket):
+        secret = ws.headers.get("x-peer-secret")
+        if not secret or not _secrets.compare_digest(_PEER_SECRET, secret):
             await ws.close(code=4001)
             return
         await ws.accept()
@@ -391,12 +391,16 @@ def build_app(secret: str) -> FastAPI:
     return app
 
 
-async def serve(secret: str, host: str = "0.0.0.0", port: int = 8766) -> None:
+async def serve(secret: str, host: str = "0.0.0.0", port: int = 8766,
+                certfile: str = "", keyfile: str = "") -> None:
     """Run the peer server forever. Imported and awaited by
     ``peer_agent.py`` alongside the heartbeat loop."""
     import uvicorn
     app = build_app(secret)
+    if not certfile or not keyfile:
+        raise RuntimeError("Peer server requires a TLS certificate and private key")
     config = uvicorn.Config(app, host=host, port=port, log_level="warning",
-                            access_log=False)
+                            access_log=False, ssl_certfile=certfile,
+                            ssl_keyfile=keyfile)
     server = uvicorn.Server(config)
     await server.serve()

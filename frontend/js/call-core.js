@@ -12,7 +12,7 @@
 // The same RTCPeerConnection / mic stream / overlay is shared between the
 // two directions because only one call can be in progress at a time.
 
-import { getToken } from "./auth.js";
+import { getToken, openTicketedWebSocket } from "./auth.js";
 import { showToast } from "./utils.js";
 
 const AUDIO_CONSTRAINTS = {
@@ -199,7 +199,7 @@ export function createCallController(cfg) {
       if (listenerActive && !listenerSock) openListener();
     }, delay);
   }
-  function openListener() {
+  async function openListener() {
     if (listenerSock) {
       try { listenerSock.close(); } catch { /* ignore */ }
       listenerSock = null;
@@ -211,8 +211,18 @@ export function createCallController(cfg) {
     const token = getToken();
     if (!token) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${location.host}/ws/signal?token=${encodeURIComponent(token)}&room=${cfg.inRoom}&role=viewer`;
-    const sock = new WebSocket(url);
+    const url = `${proto}//${location.host}/ws/signal?room=${encodeURIComponent(cfg.inRoom)}&role=viewer`;
+    let sock;
+    try {
+      sock = await openTicketedWebSocket(url);
+    } catch {
+      if (myGen === listenerGen && listenerActive) scheduleReconnect(reconnectDelay);
+      return;
+    }
+    if (myGen !== listenerGen || !listenerActive) {
+      sock.close();
+      return;
+    }
     listenerSock = sock;
 
     sock.onopen = () => { if (myGen === listenerGen) reconnectDelay = 2000; };
@@ -313,11 +323,16 @@ export function createCallController(cfg) {
       }
     };
 
-    const token = getToken();
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    callSock = new WebSocket(
-      `${proto}//${location.host}/ws/signal?token=${encodeURIComponent(token)}&room=${cfg.outRoom}&role=sender`
-    );
+    try {
+      callSock = await openTicketedWebSocket(
+        `${proto}//${location.host}/ws/signal?room=${encodeURIComponent(cfg.outRoom)}&role=sender`
+      );
+    } catch {
+      showToast("Could not authorize call", "error");
+      endCall(false);
+      return;
+    }
     callSock.onopen = () => setStatus("Calling…");
     callSock.onclose = () => { if (state !== "idle" && role === "caller") endCall(true); };
     callSock.onmessage = async (ev) => {

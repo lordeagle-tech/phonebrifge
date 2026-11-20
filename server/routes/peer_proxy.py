@@ -3,22 +3,22 @@ Browser-facing proxy routes for controlling a peer laptop.
 
 The browser is PIN-authed against the main bridge as usual; the main
 bridge then forwards screen + input traffic to the chosen peer using
-the peer's per-pair secret. The peer's local HTTP server is never
-exposed to the browser directly — every byte flows through the main
-bridge.
+the peer's per-peer secret over certificate-verified TLS. The peer's
+local server is never exposed to the browser directly — every byte
+flows through the main bridge.
 
 Endpoints (all PIN-auth; peers themselves are auth'd by the secret
 the main bridge already holds in the registry):
-  GET /api/peers/{id}/screen.mjpeg?token=...&fps=&quality=
+  GET /api/peers/{id}/screen.mjpeg?ticket=...&fps=&quality=
       Streams MJPEG from the peer's screen.
-  WS  /ws/peers/{id}/input?token=...
+  WS  /ws/peers/{id}/input?ticket=...
       Bidirectional JSON proxy to the peer's input websocket. The
       browser sends mouse/keyboard messages; the peer can echo
       pings (used by the browser to compute round-trip latency).
 
 Plus generic catch-alls used by the phone "machine picker":
-  ANY /api/peers/{id}/{rest:path}        -> http://peer/api/{rest}
-  WS  /ws/peers/{id}/{rest:path}         -> ws://peer/ws/{rest}
+  ANY /api/peers/{id}/{rest:path}        -> https://peer/api/{rest}
+  WS  /ws/peers/{id}/{rest:path}         -> wss://peer/ws/{rest}
 These let the phone re-target any tab (Files, Stats, Clipboard,
 Terminal, …) at a peer laptop without per-feature plumbing.
 """
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import ssl
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -34,7 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import Response, StreamingResponse
 
 from .. import audit, peer_registry, security
-from ..auth import verify_token
+from ..auth import consume_connection_ticket, is_token_valid
 from ..deps import require_auth
 
 http_router = APIRouter()
@@ -49,12 +50,14 @@ MJPEG_TIMEOUT = 30.0
 INPUT_RECV_TIMEOUT = 60.0
 PROXY_CHUNK = 64 * 1024
 PROXY_TIMEOUT = 30.0
+MAX_PEER_ERROR_BYTES = 1024 * 1024
 # Hop-by-hop request headers we MUST NOT forward verbatim — they
 # describe the browser↔main-bridge connection, not the main↔peer one.
 _DROP_REQ_HEADERS = {
     "host", "authorization", "cookie", "connection",
     "content-length", "transfer-encoding", "accept-encoding",
     "x-forwarded-for", "x-real-ip", "x-forwarded-proto",
+    "x-peer-secret",
 }
 _DROP_RESP_HEADERS = {
     "content-encoding", "transfer-encoding", "connection",
@@ -74,7 +77,23 @@ def _peer_endpoint_or_404(pid: str) -> dict:
                             detail="Peer is not reachable for control")
     if not peer_registry.online(pid):
         raise HTTPException(status_code=503, detail="Peer is offline")
+    if not ep.get("cert_pem"):
+        raise HTTPException(status_code=503,
+                            detail="Peer has no trusted TLS certificate; update and restart its agent")
     return ep
+
+
+def _peer_ssl_context(ep: dict) -> ssl.SSLContext:
+    """Trust the peer certificate announced over authenticated WSS as an anchor."""
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=ep["cert_pem"])
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.check_hostname = False
+        return context
+    except (KeyError, ValueError, ssl.SSLError) as exc:
+        raise HTTPException(status_code=503,
+                            detail="Peer TLS certificate is invalid") from exc
 
 
 @http_router.get("/peers/{peer_id}/screen.mjpeg")
@@ -83,33 +102,38 @@ async def proxy_screen_mjpeg(
     request: Request,
     fps: int = Query(10, ge=1, le=30),
     quality: int = Query(60, ge=20, le=95),
-    token: Optional[str] = Query(None),
+    ticket: Optional[str] = Query(None),
 ):
     """Proxy the peer's MJPEG stream to the browser. We hop to a
     background thread to do the blocking ``urlopen`` + chunked read,
     pushing bytes into an asyncio queue that StreamingResponse
     drains. This is simpler than wiring an async HTTP client and lets
     us keep the dep list lean (urllib + threading only)."""
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, request.url.path)
+    if not session_token:
         raise HTTPException(status_code=401, detail="Unauthorized")
     ep = _peer_endpoint_or_404(peer_id)
 
-    qs = urlencode({"secret": ep["secret"], "fps": fps, "quality": quality})
-    upstream = f"http://{ep['ip']}:{ep['port']}/screen.mjpeg?{qs}"
+    qs = urlencode({"fps": fps, "quality": quality})
+    upstream = f"https://{ep['ip']}:{ep['port']}/screen.mjpeg?{qs}"
+    tls_context = _peer_ssl_context(ep)
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=8)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
 
     def _pull() -> None:
-        # Plain HTTP — peer server is LAN-only and gated by the per-
-        # peer secret which the browser never sees. We use stdlib so
-        # no extra deps; the cost is a thread per active viewer,
+        # Verified HTTPS — the peer certificate was learned over the
+        # authenticated heartbeat and the browser never sees its secret.
+        # We use stdlib; the cost is a thread per active viewer,
         # which is fine for the handful of peers a user actually has.
-        from urllib.request import urlopen
+        from urllib.request import Request as URequest, urlopen
         try:
-            with urlopen(upstream, timeout=10.0) as resp:
+            req = URequest(upstream, headers={"X-Peer-Secret": ep["secret"]})
+            with urlopen(req, timeout=10.0, context=tls_context) as resp:
                 while not stop.is_set():
+                    if not is_token_valid(session_token):
+                        break
                     chunk = resp.read(MJPEG_CHUNK)
                     if not chunk:
                         break
@@ -152,14 +176,15 @@ async def proxy_screen_mjpeg(
 
 @ws_router.websocket("/ws/peers/{peer_id}/input")
 async def proxy_input_ws(websocket: WebSocket, peer_id: str,
-                         token: Optional[str] = Query(None)):
+                         ticket: Optional[str] = Query(None)):
     """Bidirectional text-frame proxy to the peer's /input WS.
 
     Browser <-> main bridge <-> peer agent. We pump messages in both
     directions; either side closing tears the whole pipe down so the
     browser sees the disconnect immediately."""
     ip = security.ws_client_ip(websocket)
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         await websocket.close(code=4001)
         return
     if not PEER_ID_RE.match(peer_id):
@@ -177,13 +202,14 @@ async def proxy_input_ws(websocket: WebSocket, peer_id: str,
     audit.log("peer", "input_open", ip=ip, outcome="ok",
               detail={"peer_id": peer_id})
 
-    qs = urlencode({"secret": ep["secret"]})
-    upstream_url = f"ws://{ep['ip']}:{ep['port']}/input?{qs}"
+    upstream_url = f"wss://{ep['ip']}:{ep['port']}/input"
 
     try:
         async with websockets.connect(upstream_url,
                                       ping_interval=None,
-                                      open_timeout=5.0) as up:
+                                      open_timeout=5.0,
+                                      additional_headers={"X-Peer-Secret": ep["secret"]},
+                                      ssl=_peer_ssl_context(ep)) as up:
             async def browser_to_peer() -> None:
                 try:
                     while True:
@@ -208,7 +234,9 @@ async def proxy_input_ws(websocket: WebSocket, peer_id: str,
 
             done, pending = await asyncio.wait(
                 {asyncio.create_task(browser_to_peer()),
-                 asyncio.create_task(peer_to_browser())},
+                 asyncio.create_task(peer_to_browser()),
+                 asyncio.create_task(security.ws_session_watchdog(
+                     websocket, session_token, "peer", "input_ws", ip))},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in pending:
@@ -243,10 +271,7 @@ async def proxy_input_ws(websocket: WebSocket, peer_id: str,
 
 
 def _filtered_request_headers(request: Request) -> dict:
-    """Drop hop-by-hop + auth headers before forwarding to the peer.
-    The peer authenticates via ``?secret=`` only — leaking the
-    main-bridge bearer token would expose a different trust
-    boundary entirely."""
+    """Drop hop-by-hop credentials; the bridge adds the peer secret later."""
     out = {}
     for k, v in request.headers.items():
         if k.lower() in _DROP_REQ_HEADERS:
@@ -265,14 +290,12 @@ def _filtered_response_headers(headers) -> dict:
 
 
 def _build_upstream_url(ep: dict, rest: str, request: Request,
-                        scheme: str = "http") -> str:
-    """Compose the peer URL: keep the original query string, drop any
-    incoming PIN token, and append the per-peer secret."""
-    # Strip incoming `token=…` from the query string so the peer
-    # doesn't see (or have to ignore) a PIN bearer it can't validate.
+                        scheme: str = "https") -> str:
+    """Compose a peer URL without forwarding bridge or peer credentials."""
+    # Browser credentials are valid only on the bridge and must never
+    # be exposed to the peer agent.
     items = [(k, v) for k, v in request.query_params.multi_items()
-             if k != "token"]
-    items.append(("secret", ep["secret"]))
+             if k not in ("token", "ticket", "secret")]
     qs = urlencode(items)
     base = "/" + rest.lstrip("/")
     sep = "?" if qs else ""
@@ -285,13 +308,13 @@ def _build_upstream_url(ep: dict, rest: str, request: Request,
 )
 async def proxy_http(peer_id: str, rest: str, request: Request,
                      _token: str = Depends(require_auth)):
-    """Generic HTTP proxy: ``/api/peers/{id}/<x>`` → ``http://peer/api/<x>``.
+    """Generic HTTP proxy: ``/api/peers/{id}/<x>`` → ``https://peer/api/<x>``.
 
     Body is buffered (acceptable for the phone-bridge's typical
     payloads — a few-MB upload at most). Response is streamed so
     large file downloads don't have to fit in memory.
 
-    The peer's secret is appended to the query string; the browser's
+    The peer's secret is attached as an HTTPS header; the browser's
     PIN bearer is stripped so it never leaves the main bridge."""
     if not rest:
         # Without a tail, this would shadow ``GET /api/peers/{id}``
@@ -303,7 +326,9 @@ async def proxy_http(peer_id: str, rest: str, request: Request,
     # forwarding to the peer (which mounts the same routers under
     # the same /api prefix).
     upstream = _build_upstream_url(ep, f"api/{rest}", request)
+    tls_context = _peer_ssl_context(ep)
     headers = _filtered_request_headers(request)
+    headers["X-Peer-Secret"] = ep["secret"]
     body = await request.body()
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=16)
@@ -317,16 +342,24 @@ async def proxy_http(peer_id: str, rest: str, request: Request,
         req = URequest(upstream, data=body if body else None,
                        method=request.method, headers=headers)
         try:
-            resp = urlopen(req, timeout=PROXY_TIMEOUT)
+            resp = urlopen(req, timeout=PROXY_TIMEOUT, context=tls_context)
         except HTTPError as e:
             # Forward the peer's status + body so the browser sees
-            # the same 404/403/etc. it would have gotten locally.
+            # the same 404/403/etc. it would have gotten locally, but
+            # never buffer an unbounded error response into bridge memory.
             try:
-                payload = e.read() or b""
+                payload = e.read(MAX_PEER_ERROR_BYTES + 1) or b""
             except Exception:  # noqa: BLE001
                 payload = b""
-            meta["status"] = e.code
-            meta["headers"] = dict(e.headers or {})
+            finally:
+                e.close()
+            if len(payload) > MAX_PEER_ERROR_BYTES:
+                meta["status"] = 502
+                meta["headers"] = {"content-type": "application/json"}
+                payload = b'{"detail":"Peer error response exceeded limit"}'
+            else:
+                meta["status"] = e.code
+                meta["headers"] = dict(e.headers or {})
             asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
             asyncio.run_coroutine_threadsafe(queue.put(None), loop)
             return
@@ -396,11 +429,12 @@ async def proxy_http(peer_id: str, rest: str, request: Request,
 
 @ws_router.websocket("/ws/peers/{peer_id}/{rest:path}")
 async def proxy_ws(websocket: WebSocket, peer_id: str, rest: str,
-                   token: Optional[str] = Query(None)):
+                   ticket: Optional[str] = Query(None)):
     """Generic WebSocket proxy: ``/ws/peers/{id}/<x>`` →
-    ``ws://peer/ws/<x>``. Forwards both text and binary frames."""
+    ``wss://peer/ws/<x>``. Forwards both text and binary frames."""
     ip = security.ws_client_ip(websocket)
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         await websocket.close(code=4001)
         return
     if not PEER_ID_RE.match(peer_id):
@@ -424,12 +458,14 @@ async def proxy_ws(websocket: WebSocket, peer_id: str, rest: str,
               detail={"peer_id": peer_id, "kind": rest})
 
     upstream_url = _build_upstream_url(ep, f"ws/{rest}", websocket,
-                                       scheme="ws")  # type: ignore[arg-type]
+                                       scheme="wss")  # type: ignore[arg-type]
 
     try:
         async with websockets.connect(upstream_url,
                                       ping_interval=None,
                                       open_timeout=5.0,
+                                      ssl=_peer_ssl_context(ep),
+                                      additional_headers={"X-Peer-Secret": ep["secret"]},
                                       max_size=None) as up:
             async def browser_to_peer() -> None:
                 try:
@@ -468,7 +504,7 @@ async def proxy_ws(websocket: WebSocket, peer_id: str, rest: str,
                 asyncio.create_task(browser_to_peer()),
                 asyncio.create_task(peer_to_browser()),
                 asyncio.create_task(security.ws_session_watchdog(
-                    websocket, token, "peer", f"ws_{rest}", ip)),
+                    websocket, session_token, "peer", f"ws_{rest}", ip)),
             }
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED,

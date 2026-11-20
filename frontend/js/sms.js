@@ -1,7 +1,7 @@
 // Mirrors the phone's SMS inbox and (optionally) auto-copies OTP codes
 // to the laptop clipboard. Live updates over /ws/sms; one-shot REST
 // fetch on init so the panel renders immediately.
-import { getToken } from "./auth.js";
+import { getToken, openTicketedWebSocket } from "./auth.js";
 import { showToast } from "./utils.js";
 
 let ws = null;
@@ -162,14 +162,14 @@ function handleFrame(payload) {
   }
 }
 
-function connect() {
+async function connect() {
   if (!active) return;
   const token = getToken();
   if (!token) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${proto}//${location.host}/ws/sms?token=${encodeURIComponent(token)}`;
+  const url = `${proto}//${location.host}/ws/sms`;
   try {
-    ws = new WebSocket(url);
+    ws = await openTicketedWebSocket(url);
   } catch {
     scheduleReconnect();
     return;

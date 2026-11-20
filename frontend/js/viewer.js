@@ -1,4 +1,5 @@
 import { initLogin, getToken, saveToken, checkAuth, setOnSessionLost } from "./auth.js";
+import { openTicketedWebSocket } from "./auth.js";
 import { showToast } from "./utils.js";
 import { initViewerCall, teardownViewerCall } from "./viewer-call.js";
 
@@ -58,11 +59,15 @@ async function startViewer() {
     }
   };
 
-  const token = getToken();
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  sock = new WebSocket(
-    `${proto}//${location.host}/ws/signal?token=${encodeURIComponent(token)}&room=${ROOM}&role=viewer`
-  );
+  try {
+    sock = await openTicketedWebSocket(
+      `${proto}//${location.host}/ws/signal?room=${ROOM}&role=viewer`
+    );
+  } catch {
+    setStatus("could not authorize viewer", "danger");
+    return;
+  }
 
   pc.onicecandidate = (e) => {
     if (e.candidate && sock?.readyState === 1) {

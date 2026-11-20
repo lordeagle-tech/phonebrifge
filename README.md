@@ -176,18 +176,20 @@ work items).
 ### One-time pairing
 
 1. On your **main laptop**, start the bridge as usual (`python run.py`).
-   The startup banner now shows a 6-digit **Peer pair code** that
+   The startup banner now shows an 8-digit **Peer pair code** that
    rotates every 5 minutes:
    ```
-   🔗 Peer pair code : 482917  (rotates in 4m 47s)
+   🔗 Peer pair code : 48291736  (rotates in 4m 47s)
       Run on another laptop:
-        python run.py peer --main https://192.168.1.42:8765 --pair-code 482917
+        python run.py peer --main https://192.168.1.42:8765 --pair-code 48291736 --fingerprint <SHA-256 fingerprint>
    ```
 
 2. On the **secondary laptop** (after `pip install -r requirements.txt`),
    run the printed command. The peer agent pairs with the main bridge,
-   stores its long-lived secret in `~/.phone-bridge/peers.json`
-   (mode 600) and starts heartbeating every 5 seconds.
+   stores its long-lived secret and the verified main-bridge TLS
+   certificate in `~/.phone-bridge/peers.json` (mode 600), then starts
+   heartbeating every 5 seconds. The command printed by the main bridge
+   includes `--fingerprint` for its self-signed certificate.
 
 3. From then on, just running `python run.py peer` (no flags) on that
    secondary laptop will reuse the saved link — no code re-entry. If
@@ -226,11 +228,11 @@ your main laptop's browser:
 You can open as many tabs as you like to control different peers in
 parallel.
 
-By default the peer agent listens on port `8766` for the screen +
-input traffic from the main bridge (override with `--peer-port`).
-Open that port on the peer's firewall — only the main laptop ever
-hits it, and every request must carry the per-peer secret, but the
-port still needs to be reachable on the LAN.
+By default the peer agent listens on port `8766` for HTTPS/WSS screen +
+input traffic from the main bridge (override with `--peer-port`). Allow
+that port through the peer's firewall only for the main bridge; every
+connection is encrypted and verified against the peer certificate sent
+over its authenticated heartbeat.
 
 ### Targeting a peer from your phone
 
@@ -255,14 +257,13 @@ SMS, Notifications, Ring) hide the pill.
 
 The Screen Mirror tab transparently switches transports based on
 target: the main laptop streams binary JPEG frames over a
-WebSocket, while peers serve the same frames as MJPEG over plain
-HTTP — the phone UI handles both, and the FPS / quality sliders
+WebSocket, while peers serve the same frames as MJPEG over verified
+HTTPS — the phone UI handles both, and the FPS / quality sliders
 work identically in either mode.
 
-The peer's per-peer secret never leaves the main bridge — your
-phone just hits `/api/peers/<id>/…` on the main bridge, which
-re-signs the request with the secret it holds in its registry and
-forwards it to the peer agent on port 8766.
+The peer's per-peer secret never reaches the phone — your phone just
+hits `/api/peers/<id>/…` on the main bridge, which forwards requests
+over certificate-verified TLS to the peer agent on port 8766.
 
 Offline peers (or peers paired with an older agent that doesn't
 expose the file/terminal endpoints) are greyed out in the picker
@@ -275,8 +276,14 @@ isn't covered in 503s while you decide what to do.
 
 ### Notes
 
-- Peers authenticate with their per-peer secret derived from the pair
-  code — the main laptop's PIN is never sent to peers.
+- Peers authenticate with a long-lived per-peer secret issued after an
+  8-digit, five-minute pairing code is accepted; the main laptop's PIN
+  is never sent to peers. Pairing is limited to three attempts per IP
+  per minute.
+- First-time peers verify the main bridge's SHA-256 certificate
+  fingerprint before sending the pairing code. The main bridge learns
+  and pins each peer's TLS certificate through the authenticated WSS
+  heartbeat. Update/restart older peer agents before controlling them.
 - Pair codes are LAN-friendly only; don't try to pair across the
   public ngrok tunnel (the secondary laptop won't be able to keep the
   heartbeat WS open through ngrok's free-tier limits anyway).
@@ -337,10 +344,10 @@ The banner will show the same URL every time, so you can bookmark it on your pho
 - **HTTPS by default**: The bridge generates a self-signed cert under `~/.phone-bridge/` on first run. Browsers will show a warning the first time you connect — tap **Advanced → Proceed**. The startup banner prints the cert's SHA-256 fingerprint so you can verify the connection is genuine.
 - **PIN lockout**: After 5 wrong PINs from the same IP, that IP is locked out for 15 minutes. Lockouts and every login attempt are recorded in the audit log.
 - **Inactivity timeout**: Sessions auto-logout after 30 min idle (override with `--session-timeout 60` or set `0` to disable). Sessions also expire after 24 hours and when the server restarts.
-- **Rate limiting**: All API endpoints are rate-limited per IP (auth: 10/min, files & clipboard: 60/min, others: 120/min) to slow brute-force and abuse.
+- **Rate limiting**: API endpoints are rate-limited per IP (auth: 10/min, peer pairing: 3/min, files & clipboard: 60/min, others: 120/min) to slow brute-force and abuse.
 - **Audit log**: Every login, file transfer, clipboard touch, lockout, and rate-limit hit is appended as JSON-lines to `~/.phone-bridge/audit.log` (rotated at 1 MB, 3 backups kept). The phone UI's **Activity** tab shows the most recent 50 events.
 - For local-only use (default), don't port-forward in your router.
-- For remote use (`--remote`), the ngrok tunnel is HTTPS-encrypted and the PIN gates every session — but anyone with the URL **and** the PIN can connect, so keep both private. Use a strong custom PIN (`--pin`).
+- For remote use (`--remote`), the ngrok tunnel is HTTPS-encrypted and the local backend binds to loopback so the plaintext listener cannot be reached directly from the LAN. The PIN gates every session — anyone with the URL **and** PIN can connect, so keep both private and use a strong custom PIN (`--pin`).
 - Stop the server (Ctrl+C) when you're done; the tunnel closes with it.
 
 ### Resetting security state

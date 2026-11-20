@@ -125,7 +125,10 @@ def print_banner(url: str, pin: str, *, remote: bool, tls: bool,
     print(f"  🔗 Peer pair code : {pair_code}  "
           f"(rotates in {expires_in // 60}m {expires_in % 60:02d}s)")
     print("     Run on another laptop:")
-    print(f"       python run.py peer --main {url} --pair-code {pair_code}")
+    peer_cmd = f"python run.py peer --main {url} --pair-code {pair_code}"
+    if fingerprint and not remote:
+        peer_cmd += f" --fingerprint {fingerprint}"
+    print(f"       {peer_cmd}")
 
     print("\n  Scan the QR code with your phone:\n")
 
@@ -230,6 +233,12 @@ def main() -> None:
     if args.remote_domain and not args.remote:
         args.remote = True  # --remote-domain implies --remote
 
+    # ngrok is the intended ingress in remote mode. Keep its local HTTP
+    # backend off LAN interfaces so clients cannot bypass the HTTPS tunnel.
+    listen_host = "127.0.0.1" if args.remote else args.host
+    if args.remote:
+        print("[security] remote mode binds the backend to 127.0.0.1 only.")
+
     tunnel = None
     if args.remote:
         url, tunnel = start_remote_tunnel(args.port, domain=args.remote_domain)
@@ -268,7 +277,7 @@ def main() -> None:
     try:
         uvicorn.run(
             app,
-            host=args.host,
+            host=listen_host,
             port=args.port,
             log_level="warning",
             ssl_certfile=cert_file,

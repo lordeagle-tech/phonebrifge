@@ -6,7 +6,7 @@ the same room and exchange SDP offers/answers and ICE candidates through
 this server. The bridge is *only* a signaling channel — once the peers have
 exchanged SDP/ICE, the actual A/V stream flows directly peer-to-peer.
 
-Protocol (JSON messages over WS at /ws/signal?token=...&room=...&role=...):
+Protocol (JSON messages over WS at /ws/signal?ticket=...&room=...&role=...):
   Client -> Server:
     {"type": "signal", "data": <SDP or ICE blob>}     # forwarded to peer
     {"type": "bye"}                                   # session ended
@@ -27,7 +27,7 @@ from typing import Dict, Optional
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from .. import audit, security
-from ..auth import verify_token
+from ..auth import consume_connection_ticket
 
 router = APIRouter()
 
@@ -58,13 +58,14 @@ _lock = asyncio.Lock()
 @router.websocket("/ws/signal")
 async def signal_ws(
     websocket: WebSocket,
-    token: str = Query(None),
+    ticket: str = Query(None),
     room: str = Query("main"),
     role: str = Query(...),
 ):
     ip = security.ws_client_ip(websocket)
 
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("screen", "signal_ws", ip=ip, outcome="auth_fail")
         await websocket.close(code=4001)
         return
@@ -117,7 +118,7 @@ async def signal_ws(
 
     async def watchdog():
         await security.ws_session_watchdog(
-            websocket, token, "screen", "signal_ws", ip)
+            websocket, session_token, "screen", "signal_ws", ip)
 
     watch_task = asyncio.create_task(watchdog())
 

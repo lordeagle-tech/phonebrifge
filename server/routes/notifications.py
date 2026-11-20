@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, \
 from fastapi import Query
 
 from .. import audit, notifications, security
-from ..auth import verify_token
+from ..auth import consume_connection_ticket
 from ..deps import require_auth
 
 router = APIRouter()
@@ -62,10 +62,11 @@ async def open_notification(request: Request,
 
 
 @ws_router.websocket("/ws/notifications")
-async def notifications_ws(websocket: WebSocket, token: str = Query(None)):
+async def notifications_ws(websocket: WebSocket, ticket: str = Query(None)):
     """Push the latest notification snapshot whenever it changes."""
     ip = security.ws_client_ip(websocket)
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("control", "notif_ws", ip=ip, outcome="auth_fail")
         await websocket.close(code=4001)
         return
@@ -100,7 +101,7 @@ async def notifications_ws(websocket: WebSocket, token: str = Query(None)):
         await asyncio.gather(
             _send(),
             _drain(),
-            security.ws_session_watchdog(websocket, token, "control",
+            security.ws_session_watchdog(websocket, session_token, "control",
                                          "notif_ws", ip),
         )
     finally:

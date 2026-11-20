@@ -15,9 +15,14 @@ confused if a swipe and a tap arrive on overlapping millisecond windows.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import shlex
 import shutil
+import tempfile
+import threading
+from pathlib import Path
 from typing import Dict, Optional
 
 ADB_INPUT_TIMEOUT = 4.0
@@ -25,6 +30,8 @@ SWIPE_MIN_DURATION_MS = 30
 SWIPE_MAX_DURATION_MS = 5000
 MAX_TEXT_CHUNK = 500
 COORD_MAX = 20000  # any sane phone is well below this
+_ROTATION_STATE_FILE = Path.home() / ".phone-bridge" / "rotation-restore.json"
+_rotation_state_lock = threading.Lock()
 
 # adb `input text` interprets a handful of characters specially. The
 # safest path is to: (a) reject control bytes, (b) shell-escape the
@@ -93,7 +100,7 @@ async def _run_adb(serial: str, *args: str) -> Dict[str, object]:
     except FileNotFoundError as e:
         return {"ok": False, "error": str(e)}
     try:
-        _, stderr = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=ADB_INPUT_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -104,8 +111,9 @@ async def _run_adb(serial: str, *args: str) -> Dict[str, object]:
         return {"ok": False, "error": "adb input timed out"}
     if proc.returncode != 0:
         msg = stderr.decode("utf-8", errors="replace").strip()
-        return {"ok": False, "error": (msg or "adb input failed")[:200]}
-    return {"ok": True}
+        return {"ok": False, "error": (msg or "adb input failed")[:200],
+                "stdout": stdout.decode("utf-8", errors="replace").strip()}
+    return {"ok": True, "stdout": stdout.decode("utf-8", errors="replace").strip()}
 
 
 def _clamp_coord(v) -> Optional[int]:
@@ -160,6 +168,183 @@ async def keyevent(serial: str, key: str) -> Dict[str, object]:
     lock = await _lock_for(serial)
     async with lock:
         return await _run_adb(serial, "input", "keyevent", str(code))
+
+
+def _load_rotation_baselines() -> Dict[str, Dict[str, int]]:
+    try:
+        raw = json.loads(_ROTATION_STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        serial: value for serial, value in raw.items()
+        if isinstance(serial, str) and isinstance(value, dict)
+        and value.get("accelerometer_rotation") in (0, 1)
+        and value.get("user_rotation") in (0, 1, 2, 3)
+    }
+
+
+def _get_rotation_baseline(serial: str) -> Optional[Dict[str, int]]:
+    with _rotation_state_lock:
+        return _load_rotation_baselines().get(serial)
+
+
+def _set_rotation_baseline(serial: str, baseline: Dict[str, int]) -> bool:
+    with _rotation_state_lock:
+        states = _load_rotation_baselines()
+        states[serial] = baseline
+        parent = _ROTATION_STATE_FILE.parent
+        temp_path = None
+        try:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(
+                prefix="rotation-restore-", suffix=".tmp", dir=parent,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                json.dump(states, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, _ROTATION_STATE_FILE)
+            temp_path = None
+            return True
+        except OSError:
+            return False
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+
+def _clear_rotation_baseline(serial: str) -> bool:
+    with _rotation_state_lock:
+        states = _load_rotation_baselines()
+        if serial not in states:
+            return True
+        del states[serial]
+        try:
+            if not states:
+                _ROTATION_STATE_FILE.unlink(missing_ok=True)
+                return True
+            parent = _ROTATION_STATE_FILE.parent
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(
+                prefix="rotation-restore-", suffix=".tmp", dir=parent,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    json.dump(states, stream, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp_path, _ROTATION_STATE_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            return True
+        except OSError:
+            return False
+
+
+async def device_action(serial: str, action: str) -> Dict[str, object]:
+    """Run one of the fixed, non-text Android controls used by the mirror UI."""
+    if action in {"home", "back", "recents"}:
+        codes = {"home": 3, "back": 4, "recents": 187}
+        return await keyevent(serial, str(codes[action]))
+
+    if action == "rotate":
+        lock = await _lock_for(serial)
+        async with lock:
+            current_rotation = await _run_adb(
+                serial, "settings", "get", "system", "user_rotation",
+            )
+            if not current_rotation.get("ok"):
+                return current_rotation
+            try:
+                rotation = int(str(current_rotation.get("stdout", "")).strip())
+            except ValueError:
+                return {"ok": False, "error": "Could not read the phone's current rotation setting"}
+            if rotation not in (0, 1, 2, 3):
+                return {"ok": False, "error": "Phone returned an unsupported rotation setting"}
+
+            baseline = _get_rotation_baseline(serial)
+            if baseline is None:
+                current_auto = await _run_adb(
+                    serial, "settings", "get", "system", "accelerometer_rotation",
+                )
+                if not current_auto.get("ok"):
+                    return current_auto
+                try:
+                    accelerometer_rotation = int(
+                        str(current_auto.get("stdout", "")).strip(),
+                    )
+                except ValueError:
+                    return {"ok": False, "error": "Could not read the phone's Auto-rotate setting"}
+                if accelerometer_rotation not in (0, 1):
+                    return {"ok": False, "error": "Phone returned an unsupported Auto-rotate setting"}
+                baseline = {
+                    "accelerometer_rotation": accelerometer_rotation,
+                    "user_rotation": rotation,
+                }
+                if not _set_rotation_baseline(serial, baseline):
+                    return {"ok": False, "error": "Could not save the original phone rotation setting; no change was made"}
+
+            # Alternate portrait/landscape and lock the choice. Android's
+            # accelerometer can otherwise immediately undo the requested turn.
+            target = 1 if rotation in (0, 2) else 0
+            disabled = await _run_adb(
+                serial, "settings", "put", "system", "accelerometer_rotation", "0",
+            )
+            if not disabled.get("ok"):
+                return disabled
+            result = await _run_adb(
+                serial, "settings", "put", "system", "user_rotation", str(target),
+            )
+            if result.get("ok"):
+                result["rotation"] = target
+                result["orientation"] = "landscape" if target == 1 else "portrait"
+                result["restore_available"] = True
+            return result
+
+    if action == "rotate_restore":
+        lock = await _lock_for(serial)
+        async with lock:
+            baseline = _get_rotation_baseline(serial)
+            if baseline is None:
+                return {"ok": True, "restored": False, "message": "No saved rotation setting to restore"}
+            restored_rotation = await _run_adb(
+                serial, "settings", "put", "system", "user_rotation",
+                str(baseline["user_rotation"]),
+            )
+            if not restored_rotation.get("ok"):
+                return restored_rotation
+            restored_auto = await _run_adb(
+                serial, "settings", "put", "system", "accelerometer_rotation",
+                str(baseline["accelerometer_rotation"]),
+            )
+            if not restored_auto.get("ok"):
+                return restored_auto
+            if not _clear_rotation_baseline(serial):
+                return {"ok": False, "error": "Rotation was restored but the saved baseline could not be cleared"}
+            return {
+                "ok": True,
+                "restored": True,
+                "rotation": baseline["user_rotation"],
+                "auto_rotate": bool(baseline["accelerometer_rotation"]),
+            }
+
+    if action in {"awake_on", "awake_off"}:
+        # Android honours this while the phone is connected to power. This
+        # avoids changing the user's screen timeout or altering awake-on-battery.
+        return await _run_adb(
+            serial, "svc", "power", "stayon",
+            "true" if action == "awake_on" else "false",
+        )
+
+    return {"ok": False, "error": "unsupported device action"}
 
 
 # `adb shell <argv...>` joins argv with spaces and ships the result to

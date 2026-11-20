@@ -1,4 +1,4 @@
-import { getToken } from "./auth.js";
+import { getToken, ticketedUrl } from "./auth.js";
 import { showToast } from "./utils.js";
 import { apiUrl } from "./target.js";
 
@@ -74,15 +74,18 @@ async function deleteEntry(path, name) {
   }
 }
 
-function downloadFile(path, name) {
-  const token = getToken();
-  const url = apiUrl(`/api/files/download?path=${encodeURIComponent(path)}&token=${token}`, "files");
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+async function downloadFile(path, name) {
+  try {
+    const url = await ticketedUrl(apiUrl(`/api/files/download?path=${encodeURIComponent(path)}`, "files"));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch {
+    showToast("Could not authorize download", "error");
+  }
 }
 
 let activeDownload = null;
@@ -371,13 +374,16 @@ export async function loadFiles(path) {
 
       item.innerHTML = `
         ${checkbox}
-        <div class="file-icon">${getFileIcon(entry)}</div>
+        <div class="file-icon"></div>
         <div class="file-info">
-          <div class="file-name">${entry.name}</div>
-          <div class="file-meta">${entry.is_dir ? "Folder" : entry.size_fmt} · ${formatDate(entry.modified)}</div>
+          <div class="file-name"></div>
+          <div class="file-meta"></div>
         </div>
         ${actions}
       `;
+      item.querySelector(".file-icon").textContent = getFileIcon(entry);
+      item.querySelector(".file-name").textContent = entry.name;
+      item.querySelector(".file-meta").textContent = `${entry.is_dir ? "Folder" : entry.size_fmt} · ${formatDate(entry.modified)}`;
 
       if (selectMode) {
         item.addEventListener("click", () => {

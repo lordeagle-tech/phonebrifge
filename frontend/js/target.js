@@ -10,8 +10,8 @@
 //     - "/api/files"                            (target = main)
 //     - "/api/peers/<id>/files"                 (target = peer)
 //   wsPath("/ws/terminal", "terminal") ->
-//     - "/ws/terminal?token=…"                  (callers append qs)
-//     - "/ws/peers/<id>/terminal?token=…"
+//     - "/ws/terminal"                         (callers append qs)
+//     - "/ws/peers/<id>/terminal"
 //
 // The peer's secret never reaches the phone — the main bridge
 // rewrites the request to the peer using the secret it already

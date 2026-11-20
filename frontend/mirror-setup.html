@@ -112,6 +112,18 @@
     .ms-ol li { margin-bottom: 2px; }
     .ms-empty { color: #94a3b8; font-size: 13px; padding: 8px 0; }
     .ms-grid2 { display: grid; grid-template-columns: 1fr 100px; gap: 8px; align-items: center; }
+    .ms-mirror-toolbar {
+      position: sticky; top: 8px; z-index: 20;
+      background: #16162a; border: 1px solid rgba(167,139,250,.35);
+      border-radius: 10px; padding: 10px; margin-bottom: 12px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    }
+    .ms-mirror-toolbar .ms-select { flex: 1 1 190px; }
+    .ms-toolbar-detail { flex: 1 1 100%; }
+    @media (max-width: 520px) {
+      .ms-mirror-toolbar { top: 4px; padding: 8px; }
+      .ms-mirror-toolbar .ms-btn { padding: 7px 9px; }
+    }
     @media (max-width: 520px) {
       .ms-grid2 { grid-template-columns: 1fr; }
     }
@@ -153,11 +165,13 @@
 
 <div id="ms-app" class="hidden">
   <a href="/" style="display:inline-block;color:#9ca3af;text-decoration:none;margin-bottom:12px;font-size:14px">← Back to Bridge</a>
-  <h1 class="ms-h1">🪞 One-Click Phone Mirror</h1>
+  <h1 class="ms-h1">📱 Full Phone View on Parrot</h1>
   <p class="ms-sub">
-    Mirrors your full Android screen on this laptop with mouse + keyboard control,
-    using the system <code>scrcpy</code> tool. Open this page from a browser on the
-    laptop itself.
+    Connect Android over USB or Wireless debugging, then open the complete phone screen
+    in a native <code>scrcpy</code> window on Parrot. Use the laptop's mouse and keyboard
+    to tap, swipe, type, and navigate the phone. Android must approve debugging first.
+    To control Parrot from the phone instead, use Phone Bridge's <strong>Screen</strong>
+    and <strong>Control</strong> tabs.
   </p>
 
   <!-- 1. Dependencies -->
@@ -334,24 +348,46 @@
 
   <!-- 5. Launch / status -->
   <div class="ms-section">
-    <div class="ms-row">
-      <span class="ms-label">5. Launch the mirror</span>
-      <span id="run-pill" class="ms-pill">Stopped</span>
-      <span id="audio-pill" class="ms-pill" title="Whether phone audio is being routed to the laptop speakers">Audio: off</span>
-      <button class="ms-btn danger" id="stop-btn" style="margin-left:auto" disabled>Stop</button>
-    </div>
-    <div class="ms-row" style="margin-top:8px">
-      <select class="ms-select" id="launch-serial"></select>
-      <select class="ms-select" id="launch-preset" style="max-width:200px">
-        <option value="default">Default (audio + clipboard)</option>
-        <option value="low-bitrate">Low bitrate (slow Wi-Fi)</option>
-        <option value="record">Record to ~/.phone-bridge/recordings</option>
-      </select>
-      <button class="ms-btn primary" id="launch-btn">Launch mirror</button>
+    <div class="ms-mirror-toolbar" aria-label="Mirror controls and phone status">
+      <div class="ms-row">
+        <span class="ms-label">5. Full phone screen on the laptop</span>
+        <span id="run-pill" class="ms-pill">Stopped</span>
+        <span id="audio-pill" class="ms-pill" title="Whether phone audio is being routed to the laptop speakers">Audio: off</span>
+        <button class="ms-btn danger" id="stop-btn" style="margin-left:auto" disabled>Stop</button>
+      </div>
+      <div class="ms-row" style="margin-top:8px">
+        <select class="ms-select" id="launch-serial" aria-label="Phone"></select>
+        <select class="ms-select" id="launch-preset" style="max-width:260px" aria-label="Mirror mode">
+          <option value="fullscreen" selected>Full screen (whole phone + audio + clipboard)</option>
+          <option value="default">Windowed (audio + clipboard)</option>
+          <option value="low-bitrate">Low bitrate (slow Wi-Fi)</option>
+          <option value="record">Record to ~/.phone-bridge/recordings</option>
+        </select>
+        <button class="ms-btn primary" id="launch-btn">Launch phone</button>
+      </div>
+      <div class="ms-row" style="margin-top:8px">
+        <span id="phone-link-pill" class="ms-pill">Phone link: checking…</span>
+        <button class="ms-btn" id="phone-reconnect-btn" disabled>Reconnect &amp; relaunch</button>
+      </div>
+      <div class="ms-row" style="margin-top:8px" aria-label="Phone controls">
+        <button class="ms-btn" data-phone-action="home" disabled>⌂ Home</button>
+        <button class="ms-btn" data-phone-action="back" disabled>← Back</button>
+        <button class="ms-btn" data-phone-action="recents" disabled>▣ Recent apps</button>
+        <button class="ms-btn" data-phone-action="rotate" disabled>↻ Rotate</button>
+        <button class="ms-btn" id="phone-rotation-restore-btn" data-phone-action="rotate_restore" disabled>Restore rotation</button>
+        <button class="ms-btn" id="phone-awake-btn" disabled>Keep awake while charging: Off</button>
+      </div>
+      <div id="phone-link-detail" class="ms-hint ms-toolbar-detail" aria-live="polite">Checking ADB connection…</div>
+      <div id="phone-prefs-note" class="ms-hint ms-toolbar-detail" aria-live="polite"></div>
+      <div id="phone-action-status" class="ms-hint" aria-live="polite"></div>
     </div>
     <div class="ms-hint">
-      A native <code>scrcpy</code> window opens on the laptop desktop — it can't be
-      embedded in this browser. Click <em>Stop</em> here to close it.
+      This mirrors the entire Android display in a native window on Parrot and forwards
+      laptop mouse/keyboard input to the phone. Navigation buttons also work if the
+      mirror window is minimized. Rotate temporarily locks portrait/landscape; use
+      <em>Restore rotation</em> or Stop to restore the saved Auto-rotate/rotation settings.
+      Keep-awake applies while the phone is charging and remains on until switched off.
+      Click <em>Stop</em> here to close the mirror.
     </div>
     <div id="run-error" class="ms-error"></div>
     <div class="ms-log" id="run-log">scrcpy log will appear here…</div>
@@ -360,15 +396,16 @@
   <!-- 6. Browser viewer (no scrcpy install required) -->
   <div class="ms-section">
     <div class="ms-row">
-      <span class="ms-label">6. Watch in a browser tab (no scrcpy install)</span>
+      <span class="ms-label">6. View and control the phone in a browser</span>
       <span id="mv-pill" class="ms-pill">Off</span>
-      <button class="ms-btn" id="mv-open-btn" style="margin-left:auto" disabled>Open viewer</button>
+      <button class="ms-btn" id="mv-open-btn" style="margin-left:auto" disabled>Reopen control</button>
     </div>
     <div class="ms-hint">
-      Streams the phone screen as PNG frames over a WebSocket so any device on
-      the LAN can open <code>/mirror-view</code> and watch — no <code>scrcpy</code>
-      needed on the viewer's machine. Independent of the native window above.
-      Stops automatically when the server shuts down.
+      Click <em>Connect &amp; control phone</em> to open the selected device directly.
+      The viewer starts the stream automatically and lets you tap, swipe, and type
+      (the Input toggle is in the viewer toolbar). This browser-based path needs ADB
+      on Parrot but does not need the native <code>scrcpy</code> app or install on
+      the viewing device. Stops when you press Stop or the server shuts down.
     </div>
     <div class="ms-row" style="margin-top:8px">
       <select class="ms-select" id="mv-serial-select"></select>
@@ -378,7 +415,7 @@
         <option value="10">10 fps</option>
         <option value="15">15 fps</option>
       </select>
-      <button class="ms-btn primary" id="mv-start-btn">Start browser viewer</button>
+      <button class="ms-btn primary" id="mv-start-btn">Connect &amp; control phone</button>
       <button class="ms-btn danger" id="mv-stop-btn" disabled>Stop</button>
     </div>
     <div id="mv-error" class="ms-error"></div>

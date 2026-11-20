@@ -20,7 +20,7 @@ from fastapi.responses import Response, StreamingResponse
 from PIL import Image
 
 from .. import audit, security
-from ..auth import verify_token
+from ..auth import consume_connection_ticket, is_token_valid
 from ..deps import require_auth
 
 http_router = APIRouter()
@@ -81,10 +81,11 @@ async def screen_frame(
 async def screen_mjpeg(
     fps: int = Query(DEFAULT_FPS),
     quality: int = Query(DEFAULT_QUALITY),
-    token: str = Query(None),
+    ticket: str = Query(None),
 ):
     """MJPEG stream — can be used as an <img> src."""
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, "/api/screen/stream")
+    if not session_token:
         return Response(status_code=401)
 
     fps = max(1, min(MAX_FPS, fps))
@@ -93,6 +94,8 @@ async def screen_mjpeg(
 
     async def generate():
         while True:
+            if not is_token_valid(session_token):
+                break
             t0 = time.monotonic()
             try:
                 frame = await asyncio.to_thread(_capture_frame, quality)
@@ -120,11 +123,12 @@ async def screen_ws(
     websocket: WebSocket,
     fps: int = Query(DEFAULT_FPS),
     quality: int = Query(DEFAULT_QUALITY),
-    token: str = Query(None),
+    ticket: str = Query(None),
 ):
     """WebSocket binary frame stream with fps/quality control."""
     ip = security.ws_client_ip(websocket)
-    if not verify_token(token):
+    session_token = consume_connection_ticket(ticket, websocket.url.path)
+    if not session_token:
         audit.log("screen", "screen_ws", ip=ip, outcome="auth_fail")
         await websocket.close(code=4001)
         return
@@ -172,7 +176,7 @@ async def screen_ws(
         await asyncio.gather(
             send_frames(),
             recv_control(),
-            security.ws_session_watchdog(websocket, token, "screen", "screen_ws", ip),
+            security.ws_session_watchdog(websocket, session_token, "screen", "screen_ws", ip),
         )
     finally:
         audit.log("screen", "screen_ws", ip=ip, outcome="disconnected")

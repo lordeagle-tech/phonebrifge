@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import ssl
 import threading
 import time
 import uuid
@@ -148,8 +149,28 @@ def get_endpoint(pid: str) -> Optional[Dict[str, Any]]:
             "ip": rec["local_ip"],
             "port": int(rec["peer_port"]),
             "secret": rec["secret"],
+            "cert_pem": rec.get("cert_pem", ""),
             "hostname": rec.get("hostname", ""),
         }
+
+
+def update_certificate(pid: str, cert_pem: str) -> bool:
+    """Store a peer TLS certificate announced over its authenticated WSS link."""
+    if not isinstance(cert_pem, str) or len(cert_pem) > 8192:
+        return False
+    try:
+        ssl.PEM_cert_to_DER_cert(cert_pem)
+    except (ValueError, ssl.SSLError):
+        return False
+    _ensure_loaded()
+    with _lock:
+        rec = _peers.get(pid)
+        if rec is None:
+            return False
+        if rec.get("cert_pem") != cert_pem:
+            rec["cert_pem"] = cert_pem
+            _persist_locked()
+    return True
 
 
 def update_capabilities(pid: str, caps: Optional[List[str]]) -> None:

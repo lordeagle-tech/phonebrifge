@@ -12,6 +12,42 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+/** Mint a short-lived, one-use ticket for a browser API URL. Only the
+ * URL path is authorized; existing query parameters are preserved, but
+ * bearer tokens are never placed in the resulting URL. */
+export async function ticketedUrl(value) {
+  const url = new URL(value, window.location.href);
+  if (url.host !== window.location.host
+      || !["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+    throw new Error("Connection tickets are restricted to this bridge");
+  }
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  let path;
+  try { path = decodeURIComponent(url.pathname); }
+  catch { throw new Error("Invalid connection path"); }
+  const response = await fetch("/api/auth/connection-ticket", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) throw new Error("Could not authorize connection");
+  const { ticket } = await response.json();
+  url.searchParams.delete("token");
+  url.searchParams.set("ticket", ticket);
+  return url.href;
+}
+
+export async function openTicketedWebSocket(value, protocols) {
+  const url = await ticketedUrl(value);
+  return protocols === undefined
+    ? new WebSocket(url)
+    : new WebSocket(url, protocols);
+}
+
 // Wrap fetch so any 401 from the server automatically logs the user out
 // (e.g. session timed out or was invalidated). The original fetch is
 // preserved so we can keep using it inside this module.
